@@ -1,0 +1,18 @@
+[
+  {
+    "id": "4OY00Fak",
+    "name": "Ponytail",
+    "description": "Lazy senior dev skill - viet code toi thieu",
+    "sourceType": "git",
+    "sourceValue": "https://github.com/DietrichGebert/ponytail",
+    "localPath": "C:\\Users\\admin\\Code\\ClaudeAgent\\server\\plugins\\4OY00Fak"
+  },
+  {
+    "id": "Zw_tZTXf",
+    "name": "caveman",
+    "description": "Make your AI coding agent talk like a caveman.",
+    "sourceType": "git",
+    "sourceValue": "https://github.com/juliusbrussee/caveman",
+    "localPath": "C:\\Users\\admin\\Code\\ClaudeAgent\\server\\plugins\\Zw_tZTXf"
+  }
+]

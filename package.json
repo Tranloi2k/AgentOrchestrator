@@ -1,0 +1,25 @@
+{
+  "name": "agents-orchestrator",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local multi-agent orchestrator that drives the Claude Code and Codex CLIs as coordinated agents, with a web UI. No API keys.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Tranloi2k/AgentOrchestrator.git"
+  },
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm run dev -w server\" \"npm run dev -w client\"",
+    "dev:server": "npm run dev -w server",
+    "dev:client": "npm run dev -w client",
+    "build:client": "npm run build -w client",
+    "start": "npm run start -w server"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

@@ -1,0 +1,18 @@
+# Tooling / editor state
+.claude
+.codegraph
+
+# Dependencies
+node_modules
+
+# Build output
+client/dist
+
+# Runtime state, not source.
+# runs.json holds full run history: your prompts and the agents' logs.
+# server/plugins/ holds plugin repos cloned at install time (third-party code).
+server/runs.json
+server/plugins/
+
+# Server logs
+*.log

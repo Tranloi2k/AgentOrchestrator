@@ -1,0 +1,8 @@
+[
+  {
+    "id": "16NVbsSK",
+    "name": "Conventional Commits",
+    "description": "Chuẩn hoá commit message theo Conventional Commits",
+    "content": "Khi commit code, luôn dùng định dạng Conventional Commits: feat:, fix:, docs:, chore:, refactor:. Ví dụ: \"feat: add login form\"."
+  }
+]
