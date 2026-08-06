@@ -1,69 +1,55 @@
 # Agents Orchestrator
 
-A local multi-agent orchestrator with a web UI. You enter one prompt, and the server spawns **real CLI processes** for each agent — either **`claude -p`** (Claude Code) or **`codex exec`** (Codex CLI), depending on the provider you assign to that agent. The UI shows workflow graphs, live logs, and run history streamed over WebSocket.
+Run Claude Code and Codex as coordinated agents from a web UI, using the CLI logins you already have.
 
-**No API keys required.** The system uses your existing local CLI login (Claude Code subscription or Codex CLI signed in via ChatGPT). It never stores or asks for API keys.
+You set up agents in the browser, wire them into a workflow graph, and hit run. The server spawns a real child process per agent, either `claude -p` or `codex exec`, and streams the output back over a WebSocket. There's no field to paste an API key anywhere, because nothing needs one. Each subprocess inherits whatever session the CLI is already signed into, so a Claude Code subscription or a ChatGPT plan with the Codex CLI is enough.
 
-## Features
+## What's in it
 
-- **Agents** — configure name, provider, model, tools, private skills, shared skills, and Claude Code plugins
-- **Skills** — reusable instruction libraries attached to multiple agents
-- **Plugins** — real Claude Code plugins (Git clone, local folder, or `.zip` URL)
-- **Workflows** — node graph editor with parallel branches, merge points, router nodes, and two-way `ask_agent` calls
-- **Run tab** — launch a single agent or a full workflow; optional auto-decompose into subtasks
-- **Run history** — persisted to disk; survives server restarts
-- **UI** — Vietnamese / English, light / dark theme, confirmation modals, success feedback on save
+Agents are presets: which CLI runs them, which model, what they're allowed to touch, and any instructions you want attached. Skills are reusable instruction blocks you write once and hang off as many agents as you like. Plugins are actual Claude Code plugins, cloned from Git or pointed at a local folder.
 
-For deeper internals, see [`docs/orchestrator-notes.md`](docs/orchestrator-notes.md).
+Workflows are a node graph rather than a linear chain, so branches can run in parallel, several branches can merge back into one node, a router node can pick a single branch based on its own answer, and agents can call each other mid-run and wait for the reply.
+
+Runs stream live to the browser and get written to disk, so the full per-task log is still there after a restart.
+
+Internals are written up in [`docs/orchestrator-notes.md`](docs/orchestrator-notes.md), and the app has a Docs tab that covers workflow setup step by step in Vietnamese and English.
 
 ## Requirements
 
-- **Node.js** ≥ 18
-- At least one of these CLIs installed and logged in:
-  - **Claude Code** — install from the official docs, then run `claude` once or `claude auth login`. Check with `claude --version`.
-  - **Codex CLI** — `npm install -g @openai/codex`, then `codex login`. Check with `codex --version`.
+Node 18 or newer, plus at least one of these CLIs installed and logged in:
 
-On startup the server probes which CLIs are available (`claude --version` / `codex --version`). Missing CLIs are disabled in the agent provider dropdown with a warning. Install a CLI later and **restart the server** to re-detect it.
+- Claude Code. Install from the official docs, then run `claude` once, or `claude auth login`. Check with `claude --version`.
+- Codex CLI. `npm install -g @openai/codex`, then `codex login`. Check with `codex --version`.
 
-## Install
+At startup the server probes for both. Whichever one is missing gets disabled in the agent provider dropdown with a warning, so you can't build an agent that's guaranteed to fail. If you install a CLI later, restart the server so it gets picked up.
+
+## Install and run
 
 ```bash
 npm install
-```
-
-This is an npm workspaces monorepo — one install covers both `server/` and `client/`.
-
-## Run (development)
-
-```bash
 npm run dev
 ```
 
-| Service | URL |
-|---------|-----|
-| UI (Vite, proxies `/api` and `/ws` to the server) | http://localhost:5173 |
-| API + WebSocket | http://localhost:5175 |
+It's an npm workspaces monorepo, so one install covers `server/` and `client/`. The UI comes up on http://localhost:5173 and proxies `/api` and `/ws` through to the API server on port 5175. Open it, type a prompt, pick an agent or a workflow, and click Run.
 
-Open http://localhost:5173, enter a prompt, pick an agent or workflow, and click **Run**.
+Other scripts:
+
+```bash
+npm run dev:server    # API only
+npm run dev:client    # UI only
+npm run build:client  # production build into client/dist
+npm run start         # API server only, does not serve the built client
+```
 
 ### Working directory
 
-By default agents run in the server process working directory (`process.cwd()`). Override globally:
+Agents run in the server's own working directory unless you say otherwise. Set it globally with an env var:
 
 ```bash
 TARGET_DIR="C:\path\to\your\repo" npm run dev
 ```
 
-Or set **Working directory** per run in the UI (with a built-in folder browser).
-
-### Other scripts
-
-```bash
-npm run dev:server   # API only
-npm run dev:client   # UI only
-npm run build:client # production build → client/dist
-npm run start        # start API server only (no static UI)
-```
+Or set it per run in the UI, which has a folder browser so you don't have to type paths.
 
 ## Project layout
 
@@ -74,111 +60,83 @@ AgentOrchestrator/
 │   └── public/             # favicon, provider icons
 ├── server/
 │   ├── index.js            # Express API + WebSocket
-│   ├── orchestrator.js     # core: agents, workflows, runs
-│   ├── mcp-bridge.js       # ask_agent MCP tool (Claude only)
+│   ├── orchestrator.js     # agents, workflows, run execution
+│   ├── mcp-bridge.js       # the ask_agent MCP tool (Claude only)
 │   ├── agents.config.json
 │   ├── skills.config.json
 │   ├── plugins.config.json
 │   ├── workflows.config.json
-│   └── runs.json           # run history (auto-managed)
+│   └── runs.json           # run history, written by the server
 └── docs/
 ```
 
-## Managing agents, skills, plugins, and workflows
+## Agents
 
-Everything is editable from the UI — you do not need to hand-edit JSON (though the server reads those files on startup).
+The field that matters most is the provider, labelled "Runs on" in the form. It decides whether the agent runs through `claude -p` or `codex exec`, and the rest of the form changes to match.
 
-### Agents
+For Claude Code agents you get a model picker, a permission mode, and per-tool allow and deny lists. One entry in that tool list is worth calling out: "Spawn sub-agents" is Claude Code's `Task` tool under a friendlier name, since "task" already means something else in an app full of workflow steps. Tick it and the agent can create its own general-purpose sub-agents to work parts of a job in parallel. Ticking it is the whole setup, because the server appends usage guidance to the system prompt when the tool is allowed, so the agent works out for itself when delegating is worth it. Their output lands in the parent's log via `--forward-subagent-text` instead of collapsing into a summary. You can also give the agent a private system prompt, attach shared skills, and attach plugins.
 
-The most important field is **Runs on** (provider): `Claude Code` or `Codex`.
+Codex agents look different because `codex exec` exposes less. The model dropdown is read from `~/.codex/models_cache.json`, which the CLI writes at login, so it always lists what your account can actually run and never goes stale. Permissions come down to a sandbox mode (`read-only`, `workspace-write`, or `danger-full-access`) plus a network access toggle that only applies in `workspace-write`. There are no per-tool lists, no plugins, and no `ask_agent`.
 
-**Claude Code**
+The read-only switch picks safe defaults for whichever provider you're on: `plan` mode with Edit and Write blocked for Claude, a `read-only` sandbox for Codex.
 
-- Model (Sonnet / Opus / Haiku / Fable / default)
-- Permission mode, allowed / disallowed tools
-- **Spawn sub-agents** — a tool in that same list (Claude Code's `Task` tool, shown under a plainer name). Tick it and the agent may create its own general-purpose sub-agents to parallelize parts of a job, then combine their results. Ticking it is the entire setup: the server injects the usage guidance into the system prompt at run time, so the agent decides for itself when to delegate — nothing to repeat in the prompt. Sub-agent output is streamed into that step's log via `--forward-subagent-text`.
-- Private skill (per-agent system prompt)
-- Shared skills from the Skills library
-- Real Claude Code plugins from the Plugins tab
+Deleting an agent that a workflow still references is refused, and the error names the workflows so you know where to look. Duplicate and delete both go through a confirmation dialog.
 
-**Codex**
+## Skills
 
-- Model dropdown is read from `~/.codex/models_cache.json` (whatever your Codex CLI fetched at login — not hardcoded)
-- Permissions are limited to what `codex exec` supports:
-  - **Sandbox**: `read-only` / `workspace-write` / `danger-full-access`
-  - **Network access in sandbox** (only when sandbox = `workspace-write`)
-- No per-tool allow/deny lists, no plugins, and **no `ask_agent`** support (see limitations)
+Reusable instructions, like commit message conventions or house rules for a project. Write one, attach it to as many agents as you want.
 
-**Read-only** mode sets safe defaults for both providers (Claude: `plan` + no Edit/Write; Codex: `read-only` sandbox).
+For Claude agents the content goes in through `--append-system-prompt`. Codex has no equivalent flag, so it gets prepended to the prompt instead. Deleting a skill that agents still use is refused, same as with agents.
 
-**Delete protection** — deleting an agent referenced by a workflow is blocked with the workflow name(s). **Duplicate** and **delete** both use in-app confirmation modals.
+## Plugins
 
-### Skills
+Real Claude Code plugins, the kind with a `.claude-plugin/plugin.json`, not a reimplementation. You can point at a Git repo (cloned into `server/plugins/<id>/`), a directory you already have locally, or a `.zip` URL. Claude Code agents only.
 
-Reusable instructions (e.g. commit conventions, project rules). Attach to any number of agents.
+## Workflows
 
-- Claude: content is appended via `--append-system-prompt`
-- Codex: content is prepended to the prompt (no equivalent flag)
+The graph supports a few things a straight chain can't:
 
-Deleting a skill still in use by agents is blocked.
+Multiple outgoing edges from a node run at the same time. Multiple incoming edges make a merge node that waits for all of them. A router node compares its own output against a condition label on each outgoing edge and takes exactly one branch, marking the rest skipped so they never spend a token.
 
-### Plugins
+Two-way calls are the interesting one. A node can call another node's agent while it's still running, block until the answer comes back, then carry on with it. That's what lets a project manager agent hand work to an engineer, wait for real code, pass it to a reviewer, and decide from the review whether to loop back. Nodes marked manual-only (`autoStart: false`) sit out the normal graph traversal entirely and run only when something calls them this way.
 
-Real Claude Code plugins (with `.claude-plugin/plugin.json`), not emulated. Three source types:
-
-1. Git repo (auto `git clone` into `server/plugins/<id>/`)
-2. Local directory
-3. `.zip` URL
-
-Claude Code agents only.
-
-### Workflows
-
-A **node graph**, not just a linear chain:
-
-- **Parallel branches** — multiple outgoing edges run concurrently
-- **Merge** — a node waits for all incoming branches
-- **Router** — matches the node's output against edge conditions to pick exactly one branch
-- **Two-way calls (`ask_agent`)** — while running, a node can call another node's agent, block until it answers, then continue
-- **Manual-only nodes** (`autoStart: false`) — only run when called via `ask_agent`, not when the workflow starts
-
-Each workflow node has its **own id** (e.g. `id="nwvl6e3"`), shown on the canvas and in the node detail panel. This is the id to pass to `ask_agent` — **not** the agent's id from the Agents tab. The node panel includes a one-click copy button.
-
-The in-app **Docs** tab (`/docs`) walks through all of this in detail (Vietnamese and English).
+Every node carries its own id, something like `nwvl6e3`, shown on the canvas and in the node panel with a copy button. That id, not the agent id from the Agents tab, is what `ask_agent` takes.
 
 ## Run history
 
-Runs are stored in `server/runs.json` and **survive server restarts**, including per-task logs and results. Writes are throttled (~400 ms) to avoid excessive disk I/O during streaming.
+Runs live in `server/runs.json` along with per-task logs and results, and they survive a restart. Writes are throttled to roughly one every 400ms so a chatty log stream doesn't hammer the disk.
 
-- If the server crashes mid-run, the next startup marks that run as **error** with an explanation (the CLI child is gone; logs up to that point are kept)
-- Delete individual runs (hover → trash) or **Clear all** — both require confirmation
-- Deleting a **running** run is refused; clear-all silently skips active runs
-- Navigating away in the UI does **not** stop a run — execution is server-side. Return to the Run tab and click the run in history to view live logs
+If the server dies mid-run, the child process dies with it and there's no way to resume, so on the next startup anything still marked running gets flipped to error with a note explaining what happened. Whatever it had already logged is kept.
 
-## Auto-decompose mode
+You can delete runs one at a time (hover for the trash icon) or clear the lot. Both ask first. Deleting a run that's still going is refused, and clear-all just skips those rather than failing outright.
 
-When enabled on a single-agent run, the server spawns a read-only Claude "planner" that splits your prompt into a JSON array of subtasks, then runs them **sequentially** with the selected agent (sequential to reduce file conflicts in the same repo).
+Navigating to another tab doesn't stop anything. Execution is server side and doesn't care whether a browser is watching. Come back to the Run tab and click the run to pick the log back up.
 
-## Current limitations
+## Auto-decompose
 
-- **Local single-user only** — no auth or multi-tenant support
-- **No stop/cancel** for a run in progress
-- **Codex** cannot use `ask_agent` (Claude-only MCP bridge); Codex nodes still work via normal workflow edges
-- **Codex** has no per-tool allow/deny — only sandbox + network flags
-- Parallel agents editing the same repo can conflict; consider separate `git worktree` directories per agent
-- Dev setup serves UI and API separately; `npm run start` does not serve the built client (use `npm run dev` or add your own static hosting)
+On a single agent run you can turn this on to have a read-only Claude planner split your prompt into a JSON array of subtasks first. Those then run one after another with the agent you picked. Sequential on purpose, since parallel agents writing into the same repo tend to trip over each other.
+
+## Limitations
+
+Local, single user, no auth. There's no way to stop a run once it's going, which is the gap that bothers me most.
+
+Codex agents can't use `ask_agent`, since the MCP bridge is Claude only. They work fine as ordinary workflow nodes. Codex also has no per-tool permissions, just the sandbox and network flags, because that's all the CLI offers.
+
+Agents writing to the same repo in parallel can conflict. A `git worktree` per agent would fix it properly and isn't built yet.
+
+`npm run start` only brings up the API. It doesn't serve the built client, so for anything beyond `npm run dev` you'd need to host `client/dist` yourself.
 
 ## Configuration files
 
-| File | Purpose |
-|------|---------|
+| File | Contents |
+|------|----------|
 | `server/agents.config.json` | Agent definitions |
 | `server/skills.config.json` | Shared skills |
-| `server/plugins.config.json` | Plugin registry |
+| `server/plugins.config.json` | Installed plugin registry |
 | `server/workflows.config.json` | Workflow graphs |
-| `server/runs.json` | Run history (managed by the server) |
+| `server/runs.json` | Run history, managed by the server |
 
-Edit via UI or directly; restart is not required for config changes during a running server (API reads/writes these files on each request).
+The UI writes all of these, so editing them by hand is optional. If you do edit one directly, restart the server: they're read into memory once at startup, and a running server won't notice the change.
 
 ## License
 
