@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 /**
- * Agent-to-agent bridge — a tiny stdio MCP server spawned as a side-process of a running
- * `claude -p` agent (a node inside a workflow run). It exposes exactly one tool, `ask_agent`,
- * which lets that node call another node's agent in the SAME workflow synchronously (send a
- * question, block until the callee's full answer comes back, then keep going) — real
- * two-way agent interaction, on top of the one-directional workflow-graph edges.
+ * Agent-to-agent bridge — a tiny stdio MCP server spawned as a side-process of a running agent
+ * (a node inside a workflow run). It exposes exactly one tool, `ask_agent`, which lets that
+ * node call another node's agent in the SAME workflow synchronously (send a question, block
+ * until the callee's full answer comes back, then keep going) — real two-way agent
+ * interaction, on top of the one-directional workflow-graph edges.
  *
- * Wiring: orchestrator.js spawns `claude` with `--mcp-config <inline json>` pointing back
- * at this file, and passes context (which workflow/run/node is calling, which sibling nodes
- * it's allowed to call — set per-node in the Workflow editor, not on the agent itself — and
- * how deep the call chain already is) via environment variables — see runClaude() /
- * buildAgentBridgeConfig() in orchestrator.js.
+ * Provider-agnostic: this is a plain stdio MCP server, so both CLIs run the exact same process
+ * and only the flags pointing at it differ. Claude Code gets it via `--mcp-config <inline
+ * json>`; Codex via `-c mcp_servers.agent-bridge.*` overrides (which also need
+ * `default_tools_approval_mode="approve"`, since `codex exec` has no TTY to approve MCP calls
+ * on). Context — which workflow/run/node is calling, which sibling nodes it may call (set
+ * per-node in the Workflow editor, not on the agent), and how deep the call chain already is —
+ * arrives through the environment either way. See buildAgentBridgeContext(),
+ * buildClaudeBridgeArgs() and buildCodexBridgeArgs() in orchestrator.js.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";

@@ -1,6 +1,6 @@
 import React from "react";
 
-const VARIANTS = ["pending", "running", "done", "error", "skipped"];
+const VARIANTS = ["pending", "running", "done", "error", "skipped", "cancelled"];
 
 export default function Badge({ variant = "pending", uppercase = true, className = "", children, style, title }) {
   const variantClass = VARIANTS.includes(variant) ? variant : "pending";

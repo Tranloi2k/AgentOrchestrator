@@ -34,6 +34,8 @@ import {
   clearRuns,
   startRun,
   startWorkflowRun,
+  stopRun,
+  resumeRun,
   askAgent,
   subscribe,
   DEFAULT_CWD,
@@ -232,6 +234,31 @@ app.post("/api/run-workflow", async (req, res) => {
     res.json({ runId });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+/** Stops a running run: kills the whole spawned CLI process tree and tells the run's own loop
+ * to stop scheduling further steps. Returns as soon as the signals are out — the run flips to
+ * `cancelled` on its own once it has finished unwinding. */
+app.post("/api/runs/:id/stop", (req, res) => {
+  try {
+    const ok = stopRun(req.params.id);
+    if (!ok) return res.status(404).json({ error: "not found" });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(409).json({ error: err.message });
+  }
+});
+
+/** Re-runs a stopped/crashed/failed workflow run from its last checkpoint — steps that already
+ * finished keep their recorded output and are not re-run. */
+app.post("/api/runs/:id/resume", (req, res) => {
+  try {
+    const ok = resumeRun(req.params.id);
+    if (!ok) return res.status(404).json({ error: "not found" });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(409).json({ error: err.message });
   }
 });
 

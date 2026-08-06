@@ -5,6 +5,8 @@ import { execFileSync } from "node:child_process";
 import { tmpdir, homedir } from "node:os";
 import spawn from "cross-spawn";
 import { nanoid } from "nanoid";
+import treeKill from "tree-kill";
+import { openWorkspaceSession, createWorktree, integrateWorktree, closeWorkspaceSession } from "./workspace.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AGENTS_FILE = path.join(__dirname, "agents.config.json");
@@ -283,6 +285,22 @@ function normalizeWorkflowInput(input) {
     description: String(input.description || ""),
     nodes,
     edges,
+    isolation: normalizeIsolationInput(input.isolation),
+  };
+}
+
+/**
+ * Per-workflow git-worktree isolation (see server/workspace.js). Off by default so existing
+ * saved workflows keep behaving exactly as before — turning it on changes where agents write.
+ *  - enabled:       isolate each branch of a parallel fan-out into its own worktree
+ *  - testCommand:   run inside each worktree before merging back; empty = merge without testing
+ *  - keepOnFailure: leave the worktree + temp branch on disk when tests fail / merge conflicts
+ */
+function normalizeIsolationInput(input) {
+  return {
+    enabled: !!input?.enabled,
+    testCommand: String(input?.testCommand || "").slice(0, 500),
+    keepOnFailure: input?.keepOnFailure !== false,
   };
 }
 
@@ -371,16 +389,20 @@ function buildSystemPrompt(agent) {
 }
 
 /**
- * Build an inline `--mcp-config` payload wiring the running node up to `mcp-bridge.js`,
- * which exposes one MCP tool (`ask_agent`) letting it call another node's agent
- * synchronously — send a question, block until that agent's full answer comes back, then
- * continue with it. This is scoped to a single workflow: `node` must belong to `workflow`
- * and only nodes listed in `node.calleeNodeIds` (configured in the workflow editor) are
- * reachable. Returns null outside a workflow run, when the node has no callees configured,
- * or the call chain is already at MAX_CALL_DEPTH (so a callee that also has callees can't
- * recurse forever).
+ * Context for wiring the running node up to `mcp-bridge.js`, the stdio MCP server exposing one
+ * tool (`ask_agent`) that lets the node call another node's agent synchronously — send a
+ * question, block until that agent's full answer comes back, then continue with it.
+ *
+ * Provider-neutral on purpose: `mcp-bridge.js` is a plain stdio MCP server with nothing
+ * Claude-specific in it, so the same process serves both CLIs and only the flags that point at
+ * it differ (buildClaudeBridgeArgs / buildCodexBridgeArgs below).
+ *
+ * Scoped to a single workflow: `node` must belong to `workflow`, and only nodes listed in
+ * `node.calleeNodeIds` (configured in the workflow editor) are reachable. Returns null outside
+ * a workflow run, when the node has no callees configured, or the call chain is already at
+ * MAX_CALL_DEPTH (so a callee that also has callees can't recurse forever).
  */
-function buildAgentBridgeConfig(node, workflow, { runId, taskId, cwd, depth }) {
+function buildAgentBridgeContext(node, workflow, { runId, taskId, cwd, depth }) {
   if (!node?.calleeNodeIds?.length || !workflow || depth >= MAX_CALL_DEPTH) return null;
   const callable = node.calleeNodeIds
     .map((id) => workflow.nodes.find((n) => n.id === id))
@@ -388,7 +410,7 @@ function buildAgentBridgeConfig(node, workflow, { runId, taskId, cwd, depth }) {
     .map((n) => ({ id: n.id, name: nodeTitle(n), description: getAgent(n.agentId)?.description || "" }));
   if (!callable.length) return null;
 
-  const env = {
+  return {
     AGENT_BRIDGE_URL: `http://localhost:${process.env.PORT || 5175}`,
     AGENT_BRIDGE_RUN_ID: runId || "",
     AGENT_BRIDGE_TASK_ID: taskId || "",
@@ -398,7 +420,37 @@ function buildAgentBridgeConfig(node, workflow, { runId, taskId, cwd, depth }) {
     AGENT_BRIDGE_CWD: cwd || "",
     AGENT_BRIDGE_CALLABLE: JSON.stringify(callable),
   };
-  return JSON.stringify({ mcpServers: { "agent-bridge": { command: "node", args: [BRIDGE_SCRIPT], env } } });
+}
+
+/** Claude Code takes the whole server definition as one inline JSON blob. */
+function buildClaudeBridgeArgs(env) {
+  return ["--mcp-config", JSON.stringify({ mcpServers: { "agent-bridge": { command: "node", args: [BRIDGE_SCRIPT], env } } })];
+}
+
+/**
+ * Codex has no `--mcp-config`; it reads MCP servers from `~/.codex/config.toml` under
+ * `[mcp_servers.<name>]`, and `-c key=value` overrides any of that per invocation with the
+ * value parsed as TOML. So the same bridge is wired in as a set of dotted overrides — nothing
+ * is written to the user's real config file.
+ *
+ * `default_tools_approval_mode = "approve"` is the load-bearing one. Without it `codex exec`
+ * treats every MCP tool call as needing approval, and with no TTY to ask there's nobody to say
+ * yes — the call comes back as `user cancelled MCP tool call` and the agent gives up. The valid
+ * values are auto | prompt | writes | approve; "auto" is NOT enough (it still cancelled in
+ * testing). This is scoped to the agent-bridge server only, so it grants nothing beyond
+ * ask_agent — Codex's own shell/file tools stay governed by `-s/--sandbox` as before.
+ */
+function buildCodexBridgeArgs(env) {
+  const s = (v) => JSON.stringify(String(v)); // TOML basic strings share JSON's escaping
+  const envTable = Object.entries(env)
+    .map(([k, v]) => `${k} = ${s(v)}`)
+    .join(", ");
+  return [
+    "-c", `mcp_servers.agent-bridge.command=${s("node")}`,
+    "-c", `mcp_servers.agent-bridge.args=[${s(BRIDGE_SCRIPT)}]`,
+    "-c", `mcp_servers.agent-bridge.env={ ${envTable} }`,
+    "-c", `mcp_servers.agent-bridge.default_tools_approval_mode=${s("approve")}`,
+  ];
 }
 
 /** --------------------------- persistence: plugins (real Claude Code plugins) --------------------------- */
@@ -532,7 +584,8 @@ function loadRuns() {
       r.status = "error";
       r.error =
         r.error ||
-        "Server đã dừng trong khi run này đang chạy dở — tiến trình bị ngắt. Log/kết quả đã có tới lúc đó vẫn được giữ nguyên.";
+        "Server đã dừng trong khi run này đang chạy dở — tiến trình bị ngắt. Log/kết quả đã có tới lúc đó vẫn được giữ nguyên. " +
+          "Nếu là run theo workflow, bấm \"Chạy tiếp\" để chạy lại từ bước bị gián đoạn thay vì làm lại từ đầu.";
     }
     for (const t of r.tasks || []) {
       if (t.status === "running") t.status = "error";
@@ -541,6 +594,73 @@ function loadRuns() {
   }
 }
 loadRuns();
+
+/** --------------------------- stopping a run --------------------------- */
+
+/** runId -> live ChildProcess objects spawned for that run. A run can have several at once
+ * (parallel branches, plus any ask_agent callee running inside one of them). */
+const liveChildren = new Map();
+
+/** Runs the user asked to stop. Separate from the child processes on purpose: killing what's
+ * currently running isn't enough, the graph/subtask loops also have to stop *scheduling* the
+ * work that hasn't started yet, and they check this. Cleared when a run is resumed. */
+const cancelling = new Set();
+
+const isCancelling = (runId) => cancelling.has(runId);
+
+function trackChild(runId, child) {
+  if (!liveChildren.has(runId)) liveChildren.set(runId, new Set());
+  const set = liveChildren.get(runId);
+  set.add(child);
+  const drop = () => {
+    set.delete(child);
+    if (!set.size) liveChildren.delete(runId);
+  };
+  child.on("close", drop);
+  child.on("error", drop);
+}
+
+/**
+ * Kills a spawned CLI *and everything it spawned*. This has to be a tree kill: `claude` and
+ * `codex` are launched through their npm shim, and they in turn spawn the tools they run (and,
+ * for a workflow node, our own mcp-bridge process). Killing just the pid we hold would orphan
+ * that whole subtree, leaving agents happily editing files for a run the user already stopped.
+ *
+ * On POSIX we ask politely first (SIGTERM) and follow up with SIGKILL for anything still alive
+ * after the grace period. On Windows tree-kill shells out to `taskkill /T /F`, which is always
+ * forceful and ignores the signal argument — there's no graceful equivalent to offer there.
+ */
+function killTree(pid, { graceMs = 5000 } = {}) {
+  if (!pid) return;
+  treeKill(pid, "SIGTERM", () => {
+    /* the callback's error is expected whenever the tree is already gone */
+  });
+  if (process.platform === "win32") return;
+  setTimeout(() => treeKill(pid, "SIGKILL", () => {}), graceMs).unref();
+}
+
+/**
+ * Marks a run as stopping and kills every process it currently owns. Returns once the signals
+ * are sent — the run's own loop notices `cancelling`, finishes unwinding (including cleaning up
+ * any git worktrees), and is what actually flips the run to `cancelled`.
+ */
+function stopRun(runId) {
+  const run = runs.get(runId);
+  if (!run) return false;
+  if (run.status !== "running") {
+    throw new Error("Run này không còn chạy — không có gì để dừng.");
+  }
+  cancelling.add(runId);
+  emit({ runId, type: "run-status", status: "running", stopping: true });
+
+  for (const task of run.tasks) {
+    if (task.status === "running") pushTaskLog(runId, task.id, "🛑 Người dùng yêu cầu dừng — đang kết thúc tiến trình...");
+  }
+  for (const child of [...(liveChildren.get(runId) || [])]) killTree(child.pid);
+  // No live child (e.g. stopped in the gap between two nodes) — the loop still picks up the
+  // flag on its next iteration and stops there.
+  return true;
+}
 
 /** Set of listener callbacks(event) for broadcasting to WS clients */
 const listeners = new Set();
@@ -582,6 +702,8 @@ function summarize(run) {
     status: run.status,
     error: run.error || null,
     createdAt: run.createdAt,
+    stopping: run.status === "running" && isCancelling(run.id),
+    resumable: canResume(run),
     tasks: run.tasks.map((t) => ({
       id: t.id,
       nodeId: t.nodeId || null,
@@ -634,8 +756,8 @@ function clearRuns() {
 
 /** Dispatches to the right local CLI based on the agent's `provider` — same {ok, resultText}
  * shape either way, so every call site (ad-hoc run, workflow node, ask_agent) stays provider-agnostic.
- * `node`/`workflow`/`extraArgs`/`depth` (the two-way ask_agent bridge) only apply to the claude
- * provider today — codex has no equivalent wired up yet, see runCodexProcess's doc comment. */
+ * `node`/`workflow`/`depth` (the two-way ask_agent bridge) now apply to both providers; only
+ * `extraArgs` is claude-specific. */
 function runAgentProcess(opts) {
   const provider = opts.agent?.provider === "codex" ? "codex" : "claude";
   // Defense in depth: the UI already refuses to let you pick an unavailable provider (see
@@ -675,22 +797,23 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
     if (agent?.model) args.push("--model", agent.model);
     if (agent?.permissionMode) args.push("--permission-mode", agent.permissionMode);
 
-    const bridgeConfig = buildAgentBridgeConfig(node, workflow, { runId, taskId, cwd, depth });
+    const bridgeEnv = buildAgentBridgeContext(node, workflow, { runId, taskId, cwd, depth });
     // An empty allowedTools list normally means "no restriction" (no flag passed at all).
     // Once agent-bridge is wired in we must pass an explicit list so the new MCP tool is
     // allowed too — so an originally-unrestricted agent falls back to the same tool set our
     // own UI lets you toggle (KNOWN_TOOLS), plus ask_agent.
-    let allowedTools = agent?.allowedTools?.length ? agent.allowedTools.slice() : bridgeConfig ? KNOWN_TOOLS.slice() : [];
-    if (bridgeConfig) allowedTools.push(AGENT_BRIDGE_TOOL);
+    let allowedTools = agent?.allowedTools?.length ? agent.allowedTools.slice() : bridgeEnv ? KNOWN_TOOLS.slice() : [];
+    if (bridgeEnv) allowedTools.push(AGENT_BRIDGE_TOOL);
     if (allowedTools.length) args.push("--allowedTools", allowedTools.join(" "));
     if (agent?.disallowedTools?.length) args.push("--disallowedTools", agent.disallowedTools.join(" "));
-    if (bridgeConfig) args.push("--mcp-config", bridgeConfig);
+    if (bridgeEnv) args.push(...buildClaudeBridgeArgs(bridgeEnv));
 
     const systemPrompt = buildSystemPrompt(agent);
     if (systemPrompt) args.push("--append-system-prompt", systemPrompt);
     args.push(...buildPluginArgs(agent));
 
     const child = spawn("claude", args, { cwd });
+    trackChild(runId, child);
     let buffer = "";
     let resultText = "";
 
@@ -751,21 +874,28 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
  *  - The one thing we *do* rely on being stable is `--output-last-message <file>`, which Codex
  *    writes the agent's final answer to regardless of the JSONL shape — that's what becomes
  *    `resultText` (what the rest of the app treats as "this step's output").
- * Not wired up: the two-way `ask_agent` bridge (Claude-only for now, via `--mcp-config`) and
- * per-tool allow/deny lists (`codex exec --help` doesn't expose an equivalent flag) — a codex
- * node's access is controlled only by `codexSandbox` below (no approval-prompt flag exists on
- * `codex exec`, only on the interactive `codex` command). Skills/private system-prompt still
- * apply: prepended to the prompt text itself, since codex has no `--append-system-prompt` flag.
+ * The two-way `ask_agent` bridge works here too, via `-c mcp_servers.*` overrides — see
+ * buildCodexBridgeArgs. Still not available: per-tool allow/deny for Codex's OWN tools. Its
+ * `[tools]` config table only has a handful of named toggles (web_search and friends), with no
+ * generic enabled/disabled list, so a codex node's access to the shell and filesystem is
+ * governed by `codexSandbox` alone. Skills/private system-prompt apply as before: prepended to
+ * the prompt text itself, since codex has no `--append-system-prompt` flag.
  */
-function runCodexProcess({ runId, taskId, prompt, cwd, agent }) {
+function runCodexProcess({ runId, taskId, prompt, cwd, agent, node, workflow, depth = 0 }) {
   return new Promise((resolve) => {
     const outFile = path.join(tmpdir(), `codex-last-${taskId}.txt`);
     const systemPrompt = buildSystemPrompt(agent);
     const fullPrompt = systemPrompt ? `${systemPrompt}\n\n---\n\n${prompt}` : prompt;
 
+    // The prompt goes in on stdin ("-"), never as an argv element. On Windows a prompt
+    // containing a newline breaks codex's own command-line parsing: everything after the first
+    // line gets re-parsed as separate arguments, so the flags that follow it are silently lost
+    // and the run dies with a misleading "--skip-git-repo-check was not specified". Any agent
+    // with a private system prompt or an attached skill produces a multi-line prompt, so that
+    // was every such Codex agent. Reading from stdin has no length limit either.
     const args = [
       "exec",
-      fullPrompt,
+      "-",
       "--json",
       "--color",
       "never",
@@ -783,11 +913,20 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent }) {
       args.push("-c", "sandbox_workspace_write.network_access=true");
     }
 
-    // stdin must be closed, not just unwritten-to: `codex exec` checks whether stdin is a TTY
-    // and if not (a bare pipe counts, even with nothing written) waits to read it and append
-    // as a `<stdin>` block — with nothing ever written or closed that wait never ends. `ignore`
-    // makes it look like there's no piped stdin at all, so codex proceeds immediately.
-    const child = spawn("codex", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const bridgeEnv = buildAgentBridgeContext(node, workflow, { runId, taskId, cwd, depth });
+    if (bridgeEnv) args.push(...buildCodexBridgeArgs(bridgeEnv));
+
+    // Codex is fussy about its argv (see the stdin note above) and its errors point at the
+    // wrong flag when something is off, so keep a way to see exactly what was spawned.
+    if (process.env.DEBUG_CODEX_ARGS) console.error("[codex argv]", JSON.stringify({ cwd, args }, null, 1));
+    const child = spawn("codex", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    trackChild(runId, child);
+    // Must be closed, not merely written: codex reads stdin to EOF before starting, so leaving
+    // the pipe open would hang the run forever.
+    child.stdin.on("error", () => {
+      /* codex already exited (e.g. bad flag) — its stderr is the useful error, not EPIPE */
+    });
+    child.stdin.end(fullPrompt);
     const pushLog = (line) => pushTaskLog(runId, taskId, line);
     let buffer = "";
 
@@ -800,6 +939,11 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent }) {
         if (!line) continue;
         try {
           const evt = JSON.parse(line);
+          const toolLine = describeCodexToolCall(evt);
+          if (toolLine !== null) {
+            if (toolLine) pushLog(toolLine);
+            continue;
+          }
           const text = extractCodexText(evt);
           pushLog(text ? `💬 ${text}` : `🔧 ${line.length > 300 ? line.slice(0, 300) + "…" : line}`);
         } catch {
@@ -838,6 +982,27 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent }) {
       resolve({ ok: code === 0, resultText });
     });
   });
+}
+
+/**
+ * Renders Codex's `mcp_tool_call` events as readable log lines instead of dumping raw JSONL —
+ * this is how an ask_agent call from a Codex node shows up in its task log, matching the
+ * `🔧 dùng tool:` lines the Claude path produces. Returns null for anything else.
+ *
+ * Three-way return: a string to log, "" for a recognized event that should be swallowed, and
+ * null for "not a tool call" so the caller falls through to its other handlers. The empty
+ * string matters — `item.started` has to be actively suppressed rather than merely unhandled,
+ * or it lands in the raw-JSONL fallback and every tool call gets logged twice, once as
+ * unreadable JSON and once properly.
+ */
+function describeCodexToolCall(evt) {
+  const item = evt?.item;
+  if (item?.type !== "mcp_tool_call") return null;
+  // The matching item.completed carries the same arguments plus the outcome.
+  if (evt.type === "item.started") return "";
+  const name = `${item.server || "mcp"}/${item.tool || "?"}`;
+  if (item.error) return `❌ tool ${name} lỗi: ${item.error.message || JSON.stringify(item.error)}`;
+  return `🔧 dùng tool: ${name} ${summarizeInput(item.arguments)}`;
 }
 
 /** Best-effort text extraction across a few plausible Codex `--json` event shapes; returns
@@ -947,7 +1112,7 @@ async function askAgent({ runId, workflowId, callerNodeId, targetNodeId, questio
   });
 
   task.resultText = resultText;
-  task.status = ok ? "done" : "error";
+  task.status = isCancelling(runId) ? "cancelled" : ok ? "done" : "error";
   emit({ runId, taskId: task.id, type: "task-status", status: task.status });
 
   return resultText;
@@ -997,11 +1162,14 @@ async function executeRun(run, agent) {
 
     subtasks = await decomposePrompt({ runId, taskId: plannerTask.id, prompt, cwd });
 
-    plannerTask.status = "done";
-    emit({ runId, taskId: plannerTask.id, type: "task-status", status: "done" });
+    plannerTask.status = isCancelling(runId) ? "cancelled" : "done";
+    emit({ runId, taskId: plannerTask.id, type: "task-status", status: plannerTask.status });
   }
 
   for (const subPrompt of subtasks) {
+    // Stopping between subtasks: nothing is running to kill, so the loop itself has to notice.
+    if (isCancelling(runId)) break;
+
     const task = newTask(subPrompt, "agent");
     run.tasks.push(task);
     emit({ runId, taskId: task.id, type: "task-created", task });
@@ -1017,12 +1185,13 @@ async function executeRun(run, agent) {
     });
 
     task.resultText = resultText;
-    task.status = ok ? "done" : "error";
+    task.status = isCancelling(runId) ? "cancelled" : ok ? "done" : "error";
     emit({ runId, taskId: task.id, type: "task-status", status: task.status });
   }
 
-  run.status = "done";
-  emit({ runId, type: "run-status", status: "done" });
+  run.status = isCancelling(runId) ? "cancelled" : "done";
+  cancelling.delete(runId);
+  emit({ runId, type: "run-status", status: run.status });
 }
 
 /** --------------------------- workflow run (graph: parallel branches + conditional routing) --------------------------- */
@@ -1038,26 +1207,97 @@ async function startWorkflowRun({ prompt, workflowId, cwd }) {
     prompt,
     agentId: null,
     workflowId: workflow.id,
+    // Snapshot of the graph AS IT WAS when the run started. The run (and any later resume)
+    // replays against this, not against the live workflow — editing a workflow shouldn't
+    // silently rewrite a run that's already in flight, and the checkpoint below is keyed by
+    // these node ids.
     workflowNodes: workflow.nodes,
     workflowEdges: workflow.edges,
+    workflowIsolation: workflow.isolation,
     decompose: false,
     cwd: cwd || DEFAULT_CWD,
     status: "running",
     createdAt: Date.now(),
     tasks: [],
+    checkpoint: emptyCheckpoint(),
   };
   runs.set(runId, run);
   emit({ runId, type: "run-created", run: summarize(run) });
 
+  launchWorkflowRun(run);
+  return runId;
+}
+
+/** --------------------------- checkpoint & resume --------------------------- */
+
+/** Per-node progress, rebuilt into the in-memory graph state on resume. Lives on the run so it
+ * rides along to runs.json with every other emit — i.e. it survives a crash, not just a stop. */
+function emptyCheckpoint() {
+  return { nodeStates: {}, outputs: {}, routerChoice: {} };
+}
+
+/** Rebuilds the workflow object a run executes against, from the run's own snapshot. */
+function snapshotWorkflow(run) {
+  return {
+    id: run.workflowId,
+    nodes: run.workflowNodes || [],
+    edges: run.workflowEdges || [],
+    isolation: run.workflowIsolation || { enabled: false, testCommand: "", keepOnFailure: true },
+  };
+}
+
+function launchWorkflowRun(run) {
   process.nextTick(() =>
-    executeWorkflowRun(run, workflow).catch((err) => {
+    executeWorkflowRun(run, snapshotWorkflow(run)).catch((err) => {
       run.status = "error";
       run.error = err.message;
-      emit({ runId, type: "run-status", status: "error", error: err.message });
+      emit({ runId: run.id, type: "run-status", status: "error", error: err.message });
     })
   );
+}
 
-  return runId;
+/**
+ * A node is worth re-running unless it already finished cleanly. `error` counts as re-runnable
+ * on purpose: that's usually the node the run died on, and "resume" is meant to pick up exactly
+ * there. `skipped` is dropped back to pending too — the skip is re-derived from the edges and
+ * the restored router choices anyway, so restoring it would just be a second source of truth.
+ */
+function checkpointStateFor(saved) {
+  return saved === "done" ? "done" : "pending";
+}
+
+/** True when a stopped/crashed/failed workflow run still has nodes that never completed. */
+function canResume(run) {
+  if (!run || run.status === "running" || !run.workflowId) return false;
+  const nodes = (run.workflowNodes || []).filter((n) => n.autoStart !== false);
+  if (!nodes.length) return false;
+  const saved = run.checkpoint?.nodeStates || {};
+  return nodes.some((n) => saved[n.id] !== "done");
+}
+
+/**
+ * Re-runs a workflow run from its checkpoint: nodes that already finished keep their recorded
+ * output and are not re-run, everything else starts over. Tasks from the interrupted attempt
+ * stay in the history as-is and the new attempt appends its own, so the log shows both tries
+ * rather than pretending the first one didn't happen.
+ */
+function resumeRun(runId) {
+  const run = runs.get(runId);
+  if (!run) return false;
+  if (run.status === "running") throw new Error("Run này đang chạy — không cần resume.");
+  if (!run.workflowId) {
+    throw new Error("Chỉ run theo workflow mới resume được (run 1 agent không có checkpoint theo node).");
+  }
+  if (!canResume(run)) throw new Error("Run này đã chạy xong tất cả các bước — không còn gì để chạy tiếp.");
+
+  cancelling.delete(runId);
+  run.status = "running";
+  run.error = null;
+  run.resumedAt = Date.now();
+  emit({ runId, type: "run-status", status: "running" });
+
+  launchWorkflowRun(run);
+  return true;
 }
 
 function nodeTitle(node) {
@@ -1105,7 +1345,69 @@ function pickRoute(resultText, outgoingEdges) {
   return fallback || outgoingEdges[0];
 }
 
+/** Opens the git-worktree isolation session for a run (see server/workspace.js), plus the
+ * "Workspace" task its setup/teardown logs go into. Returns null when isolation is off for
+ * this workflow, or when it can't apply (cwd isn't a git repo) — the caller then runs every
+ * node in the shared cwd exactly as before. */
+async function openRunWorkspace(run, workflow) {
+  if (!workflow.isolation?.enabled) return null;
+
+  const task = newTask("🗂️ Không gian làm việc (git worktree)", "workspace");
+  run.tasks.push(task);
+  emit({ runId: run.id, taskId: task.id, type: "task-created", task });
+  task.status = "running";
+  emit({ runId: run.id, taskId: task.id, type: "task-status", status: "running" });
+
+  const log = (line) => pushTaskLog(run.id, task.id, line);
+  const session = await openWorkspaceSession({
+    cwd: run.cwd,
+    runId: run.id,
+    isolation: workflow.isolation,
+    log,
+  });
+
+  if (!session) {
+    task.status = "skipped";
+    emit({ runId: run.id, taskId: task.id, type: "task-status", status: "skipped" });
+    return null;
+  }
+  log(
+    `Cách ly đang BẬT. Repo: ${session.repoRoot} · nhánh gốc: ${session.baseBranch}\n` +
+      `Mỗi nhánh chạy song song sẽ có worktree riêng; sau khi xong sẽ commit → ${
+        session.testCommand ? `chạy \`${session.testCommand}\`` : "(không cấu hình kiểm thử)"
+      } → gộp về nhánh gốc → dọn dẹp.`
+  );
+  return { session, taskId: task.id, log };
+}
+
+/** Opens (and always closes) the isolation session around the actual graph walk. */
 async function executeWorkflowRun(run, workflow) {
+  const workspace = await openRunWorkspace(run, workflow);
+  // Worktrees deliberately left on disk (failed tests / merge conflicts) — closeWorkspaceSession
+  // must not sweep the run's worktree root while any of these are still there.
+  const keptDirs = [];
+  try {
+    await executeGraph(run, workflow, workspace, keptDirs);
+  } finally {
+    // The run is over one way or another; a later resume must not inherit the stop flag.
+    cancelling.delete(run.id);
+    if (workspace) {
+      await closeWorkspaceSession(workspace.session, keptDirs);
+      const wsTask = run.tasks.find((t) => t.id === workspace.taskId);
+      if (wsTask?.status === "running") {
+        workspace.log(
+          keptDirs.length
+            ? `Hoàn tất. Còn ${keptDirs.length} không gian riêng được giữ lại để kiểm tra (xem log các bước tương ứng).`
+            : "Hoàn tất. Đã dọn sạch mọi worktree và nhánh tạm."
+        );
+        wsTask.status = "done";
+        emit({ runId: run.id, taskId: wsTask.id, type: "task-status", status: "done" });
+      }
+    }
+  }
+}
+
+async function executeGraph(run, workflow, workspace, keptDirs) {
   const { id: runId, prompt, cwd } = run;
   // Nodes with autoStart:false never run as part of the graph itself (not a root, and any
   // edge touching them is ignored here) — they only run when another node calls them via
@@ -1120,12 +1422,27 @@ async function executeWorkflowRun(run, workflow) {
   const incomingOf = new Map(nodes.map((n) => [n.id, edges.filter((e) => e.to === n.id)]));
   const outgoingOf = new Map(nodes.map((n) => [n.id, edges.filter((e) => e.from === n.id)]));
 
-  const state = new Map(nodes.map((n) => [n.id, "pending"])); // pending|running|done|error|skipped
-  const output = new Map();
-  const routerChoice = new Map(); // routerNodeId -> chosen edge id
+  // Seeded from the run's checkpoint, so a resumed run starts with everything that already
+  // finished still marked done (with its output) instead of re-running the whole graph. On a
+  // fresh run the checkpoint is empty and this collapses to the old all-pending start.
+  const cp = (run.checkpoint ||= emptyCheckpoint());
+  const state = new Map(nodes.map((n) => [n.id, checkpointStateFor(cp.nodeStates[n.id])])); // pending|running|done|error|skipped|cancelled
+  const output = new Map(Object.entries(cp.outputs));
+  const routerChoice = new Map(Object.entries(cp.routerChoice)); // routerNodeId -> chosen edge id
   const taskIdByNode = new Map();
 
-  const edgeSourceResolved = (e) => ["done", "error", "skipped"].includes(state.get(e.from));
+  const resumedNodes = nodes.filter((n) => state.get(n.id) === "done");
+
+  /** Mirrors a node's resolved state into the run's checkpoint. Called on every transition, so
+   * whatever runs.json holds at any moment is enough to resume from. */
+  const checkpointNode = (nodeId) => {
+    cp.nodeStates[nodeId] = state.get(nodeId);
+    if (output.has(nodeId)) cp.outputs[nodeId] = output.get(nodeId);
+    if (routerChoice.has(nodeId)) cp.routerChoice[nodeId] = routerChoice.get(nodeId);
+    scheduleSaveRuns();
+  };
+
+  const edgeSourceResolved = (e) => ["done", "error", "skipped", "cancelled"].includes(state.get(e.from));
   const edgeActive = (e) => {
     const src = nodeById.get(e.from);
     if (state.get(e.from) !== "done") return false;
@@ -1133,8 +1450,26 @@ async function executeWorkflowRun(run, workflow) {
     return true;
   };
 
+  if (resumedNodes.length) {
+    const task = newTask(
+      `▶️ Chạy tiếp từ checkpoint — bỏ qua ${resumedNodes.length} bước đã xong: ${resumedNodes.map(nodeTitle).join(", ")}`,
+      "resume"
+    );
+    task.status = "done";
+    run.tasks.push(task);
+    emit({ runId, taskId: task.id, type: "task-created", task });
+  }
+
   let guard = 0;
   while (true) {
+    // Checked before scheduling anything new: stopRun() kills whatever is running, but the
+    // graph also has to stop handing out the work that hasn't started yet.
+    if (isCancelling(runId)) {
+      run.status = "cancelled";
+      emit({ runId, type: "run-status", status: "cancelled" });
+      return;
+    }
+
     if (++guard > nodes.length * 4 + 20) {
       run.status = "error";
       emit({ runId, type: "run-status", status: "error", error: "Workflow graph không hợp lệ (có thể có vòng lặp)." });
@@ -1159,6 +1494,7 @@ async function executeWorkflowRun(run, workflow) {
           taskIdByNode.set(n.id, task.id);
           emit({ runId, taskId: task.id, type: "task-created", task });
           emit({ runId, taskId: task.id, type: "task-status", status: "skipped" });
+          checkpointNode(n.id);
           changed = true;
         }
       }
@@ -1177,7 +1513,7 @@ async function executeWorkflowRun(run, workflow) {
         run.status = "error";
         emit({ runId, type: "run-status", status: "error", error: "Workflow graph không hợp lệ (bế tắc)." });
       } else {
-        const anyError = nodes.some((n) => state.get(n.id) === "error");
+        const anyError = nodes.some((n) => ["error", "cancelled"].includes(state.get(n.id)));
         run.status = anyError ? "error" : "done";
         emit({ runId, type: "run-status", status: run.status });
       }
@@ -1186,29 +1522,58 @@ async function executeWorkflowRun(run, workflow) {
 
     for (const n of ready) state.set(n.id, "running");
 
+    // Isolation only kicks in on an actual fan-out: a batch of one node has nobody to collide
+    // with, and paying worktree + test + merge for every step of a linear workflow would be
+    // pure overhead (and would rewrite the repo's history into one commit per step).
+    const isolateBatch = !!workspace && ready.length > 1;
+
+    // Created up-front, before any agent starts, so every branch of the fan-out begins from
+    // the same HEAD — not from whatever an earlier sibling happened to have merged already.
+    const batch = [];
+    for (const n of ready) {
+      const task = newTask(nodeTitle(n), n.kind === "router" ? "workflow-router" : "workflow-node", n.id);
+      run.tasks.push(task);
+      taskIdByNode.set(n.id, task.id);
+      emit({ runId, taskId: task.id, type: "task-created", task });
+
+      const wt = isolateBatch
+        ? await createWorktree(workspace.session, n.id, (line) => pushTaskLog(runId, task.id, line))
+        : null;
+      batch.push({ node: n, task, wt, cwd: wt ? wt.dir : cwd });
+    }
+
     await Promise.all(
-      ready.map(async (n) => {
+      batch.map(async ({ node: n, task, cwd: nodeCwd }) => {
         const inc = incomingOf.get(n.id).filter(edgeActive);
         const inputs = inc.map((e) => ({ title: nodeTitle(nodeById.get(e.from)), text: output.get(e.from) || "" }));
         const nodePrompt = buildNodePrompt(n.promptTemplate, prompt, inputs);
 
-        const task = newTask(nodeTitle(n), n.kind === "router" ? "workflow-router" : "workflow-node", n.id);
-        run.tasks.push(task);
-        taskIdByNode.set(n.id, task.id);
-        emit({ runId, taskId: task.id, type: "task-created", task });
         task.status = "running";
         emit({ runId, taskId: task.id, type: "task-status", status: "running" });
 
         const agent = getAgent(n.agentId);
-        const { ok, resultText } = await runAgentProcess({ runId, taskId: task.id, prompt: nodePrompt, cwd, agent, node: n, workflow });
+        const { ok, resultText } = await runAgentProcess({
+          runId,
+          taskId: task.id,
+          prompt: nodePrompt,
+          cwd: nodeCwd,
+          agent,
+          node: n,
+          workflow,
+        });
 
         task.resultText = resultText;
         output.set(n.id, resultText);
 
         if (!ok) {
-          state.set(n.id, "error");
-          task.status = "error";
-          emit({ runId, taskId: task.id, type: "task-status", status: "error" });
+          // A CLI that exited non-zero *because we killed it* isn't a failure to report as one
+          // — it's the stop the user asked for, and it must not be checkpointed as a node that
+          // was tried and failed, or resume would treat it as re-runnable for the wrong reason.
+          const cancelled = isCancelling(runId);
+          state.set(n.id, cancelled ? "cancelled" : "error");
+          task.status = cancelled ? "cancelled" : "error";
+          emit({ runId, taskId: task.id, type: "task-status", status: task.status });
+          checkpointNode(n.id);
           return;
         }
 
@@ -1228,8 +1593,38 @@ async function executeWorkflowRun(run, workflow) {
         state.set(n.id, "done");
         task.status = "done";
         emit({ runId, taskId: task.id, type: "task-status", status: "done" });
+        checkpointNode(n.id);
       })
     );
+
+    // Commit → test → merge → clean up, ONE branch at a time: `git merge` takes the repo's
+    // index lock, and each merge has to see the result of the previous one to detect a real
+    // conflict between two siblings. A branch that fails its tests or conflicts flips its node
+    // to "error" here, so downstream steps get skipped instead of building on work that never
+    // actually landed on the base branch.
+    //
+    // On a stop, the branches are torn down instead: testing and merging work the user just
+    // cancelled would be exactly the surprise they were trying to avoid. The worktrees are kept
+    // or dropped by the same keepOnFailure setting, so whatever the agents did is still there
+    // to look at.
+    const stopping = isCancelling(runId);
+    for (const { node: n, task, wt } of batch) {
+      if (!wt) continue;
+      const agentFailed = stopping || state.get(n.id) === "error";
+      if (stopping) pushTaskLog(runId, task.id, "🛑 Run bị dừng — bỏ qua kiểm thử và gộp nhánh cho không gian riêng này.");
+      const { ok } = await integrateWorktree(workspace.session, wt, {
+        title: `${nodeTitle(n)} (${runId})`,
+        agentFailed,
+        log: (line) => pushTaskLog(runId, task.id, line),
+      });
+      if (!ok && workspace.session.keepOnFailure) keptDirs.push(wt.dir);
+      if (!ok && !agentFailed) {
+        state.set(n.id, "error");
+        task.status = "error";
+        emit({ runId, taskId: task.id, type: "task-status", status: "error" });
+        checkpointNode(n.id);
+      }
+    }
   }
 }
 
@@ -1272,6 +1667,8 @@ export {
   clearRuns,
   startRun,
   startWorkflowRun,
+  stopRun,
+  resumeRun,
   askAgent,
   subscribe,
   DEFAULT_CWD,

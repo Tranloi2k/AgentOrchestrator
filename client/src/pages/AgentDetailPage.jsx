@@ -261,7 +261,9 @@ export default function AgentDetailPage() {
             emptyMessage={t("agents.noSkills")}
           />
         </DetailField>
-        {!isCodex && (
+        {isCodex ? (
+          <HelperText>{t("agents.codexSkillsHint")}</HelperText>
+        ) : (
           <DetailField label={t("agents.plugins")} full>
             <ChipSelect
               nameStyle

@@ -922,6 +922,15 @@ button.secondary-btn.danger:disabled:hover {
   flex-wrap: wrap;
 }
 
+/* Stop / Resume sit inline with the status badge, so they need to be badge-sized rather
+   than form-sized. */
+.run-header .run-header-action {
+  padding: 2px 10px;
+  font-size: 12px;
+  line-height: 18px;
+  margin-left: 2px;
+}
+
 /* ---------- Task cards ---------- */
 .task-card {
   background: var(--color-surface);
@@ -1046,6 +1055,18 @@ button.secondary-btn.danger:disabled:hover {
 }
 
 .badge.skipped::before {
+  background: var(--color-on-surface-muted);
+}
+
+/* Stopped on purpose — deliberately not the error red: nothing went wrong, the user
+   asked for it. Muted like skipped, but solid rather than faded, since a cancelled step
+   did run and has a log worth reading. */
+.badge.cancelled {
+  background: var(--color-neutral);
+  color: var(--color-on-surface-muted);
+}
+
+.badge.cancelled::before {
   background: var(--color-on-surface-muted);
 }
 
@@ -2266,6 +2287,16 @@ button.secondary-btn.danger:disabled:hover {
 .canvas-node.status-skipped {
   opacity: 0.55;
   border-style: dashed;
+}
+
+.canvas-node.status-cancelled {
+  opacity: 0.7;
+  border-style: dashed;
+  border-color: var(--color-on-surface-muted);
+}
+
+.canvas-node-dot.status-cancelled {
+  background: var(--color-on-surface-muted);
 }
 
 .canvas-node.router {

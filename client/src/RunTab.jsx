@@ -32,6 +32,8 @@ function TaskCard({ task }) {
       "workflow-node": "kind.step",
       "workflow-router": "kind.router",
       "agent-call": "kind.agentCall",
+      workspace: "kind.workspace",
+      resume: "kind.resume",
     }[task.kind] || "kind.agent";
 
   return (
@@ -48,6 +50,16 @@ function TaskCard({ task }) {
       {open && <pre>{task.log?.length ? task.log.join("\n") : t("run.noLog")}</pre>}
     </div>
   );
+}
+
+/** A resumed run re-runs some nodes, so one nodeId can have several tasks across attempts.
+ * The canvas should reflect the latest attempt, not the first one still sitting in history. */
+function latestTaskForNode(tasks, nodeId, kind) {
+  for (let i = tasks.length - 1; i >= 0; i--) {
+    const task = tasks[i];
+    if (task.nodeId === nodeId && (!kind || task.kind === kind)) return task;
+  }
+  return null;
 }
 
 export default function RunTab() {
@@ -68,6 +80,9 @@ export default function RunTab() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [browsing, setBrowsing] = useState(false);
+  // Separate from the form's `error`: a failed stop/resume belongs next to the run it happened
+  // to, not under the "Run" button in the sidebar where nobody is looking.
+  const [runActionError, setRunActionError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState(null); // run object pending delete, or "__all__"
 
   useEffect(() => {
@@ -118,6 +133,12 @@ export default function RunTab() {
       }
       if (!selectedRunId || evt.runId !== selectedRunId) return;
 
+      // A run reaching a terminal status changes more than the badge — whether it can be
+      // resumed is computed server side, so re-read the run rather than guessing locally.
+      if (evt.type === "run-status" && evt.status !== "running") {
+        api.getRun(evt.runId).then((d) => setSelectedRun(d.run)).catch(() => {});
+      }
+
       setSelectedRun((prev) => {
         if (!prev) return prev;
         const next = { ...prev, tasks: prev.tasks.map((task) => ({ ...task, log: [...task.log] })) };
@@ -159,6 +180,33 @@ export default function RunTab() {
       setError(err.message);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleStop() {
+    if (!selectedRun) return;
+    setRunActionError("");
+    // Optimistic: the run stays "running" until its loop finishes unwinding (which can take a
+    // moment while worktrees are cleaned up), so flip the button to "stopping" right away
+    // instead of leaving it looking like the click did nothing.
+    setSelectedRun((prev) => (prev ? { ...prev, stopping: true } : prev));
+    try {
+      await api.stopRun(selectedRun.id);
+    } catch (err) {
+      setRunActionError(err.message);
+      setSelectedRun((prev) => (prev ? { ...prev, stopping: false } : prev));
+    }
+  }
+
+  async function handleResume() {
+    if (!selectedRun) return;
+    setRunActionError("");
+    try {
+      await api.resumeRun(selectedRun.id);
+      loadRun(selectedRun.id);
+      refreshRuns();
+    } catch (err) {
+      setRunActionError(err.message);
     }
   }
 
@@ -347,13 +395,36 @@ export default function RunTab() {
                   : t("run.meta.agent", { id: selectedRun.agentId })}{" "}
                 · {selectedRun.decompose ? t("run.meta.multi") : t("run.meta.single")} ·{" "}
                 <Badge variant={selectedRun.status}>{t(`status.${selectedRun.status}`)}</Badge>
+                {selectedRun.status === "running" && (
+                  <Button
+                    variant="secondary"
+                    color="danger"
+                    className="run-header-action"
+                    disabled={selectedRun.stopping}
+                    onClick={handleStop}
+                    title={t("run.stop.hint")}
+                  >
+                    {selectedRun.stopping ? t("run.stopping") : t("run.stop")}
+                  </Button>
+                )}
+                {selectedRun.resumable && (
+                  <Button
+                    variant="secondary"
+                    className="run-header-action"
+                    onClick={handleResume}
+                    title={t("run.resume.hint")}
+                  >
+                    {t("run.resume")}
+                  </Button>
+                )}
               </div>
+              <ErrorBox>{runActionError}</ErrorBox>
             </div>
             {selectedRun.workflowId && selectedRun.workflowNodes && (
               <WorkflowCanvas
                 readOnly
                 nodes={selectedRun.workflowNodes.map((n) => {
-                  const task = selectedRun.tasks.find((tk) => tk.nodeId === n.id);
+                  const task = latestTaskForNode(selectedRun.tasks, n.id);
                   const agent = agents.find((a) => a.id === n.agentId);
                   return {
                     id: n.id,
@@ -368,13 +439,13 @@ export default function RunTab() {
                 })}
                 edges={selectedRun.workflowEdges.map((e) => ({
                   ...e,
-                  status: selectedRun.tasks.find((tk) => tk.nodeId === e.to)?.status,
+                  status: latestTaskForNode(selectedRun.tasks, e.to)?.status,
                 }))}
                 callEdges={selectedRun.workflowNodes.flatMap((n) =>
                   (n.calleeNodeIds || []).map((to) => ({
                     from: n.id,
                     to,
-                    status: selectedRun.tasks.find((tk) => tk.nodeId === to && tk.kind === "agent-call")?.status,
+                    status: latestTaskForNode(selectedRun.tasks, to, "agent-call")?.status,
                   }))
                 )}
               />

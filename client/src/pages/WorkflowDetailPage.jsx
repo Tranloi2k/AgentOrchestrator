@@ -16,7 +16,13 @@ import {
   HelperText,
 } from "../components/index.js";
 
-const BLANK = { name: "", description: "", nodes: [], edges: [] };
+const BLANK = {
+  name: "",
+  description: "",
+  nodes: [],
+  edges: [],
+  isolation: { enabled: false, testCommand: "", keepOnFailure: true },
+};
 
 // "General" (agent + prompt) is always visible, not a switchable tab — it's the one thing
 // you need for every node, not an optional/advanced setting like the three below.
@@ -101,6 +107,10 @@ export default function WorkflowDetailPage() {
     setForm((f) => ({ ...f, edges: [...f.edges, { id: newId(), from: fromId, to: toId, condition: "" }] }));
   }
 
+  function updateIsolation(patch) {
+    setForm((f) => ({ ...f, isolation: { ...BLANK.isolation, ...f.isolation, ...patch } }));
+  }
+
   function updateNode(nodeId, patch) {
     setForm((f) => ({ ...f, nodes: f.nodes.map((n) => (n.id === nodeId ? { ...n, ...patch } : n)) }));
   }
@@ -149,6 +159,7 @@ export default function WorkflowDetailPage() {
   const outgoingEdges = selectedNode ? form.edges.filter((e) => e.from === selectedNode.id) : [];
   const otherNodes = selectedNode ? form.nodes.filter((n) => n.id !== selectedNode.id) : [];
   const callEdges = form.nodes.flatMap((n) => (n.calleeNodeIds || []).map((to) => ({ from: n.id, to })));
+  const isolation = form.isolation || BLANK.isolation;
 
   if (loading) {
     return <div className="tab-content detail-page"><div className="flow-desc">{t("detail.loading")}</div></div>;
@@ -370,6 +381,35 @@ export default function WorkflowDetailPage() {
           )}
         </div>
         {!form.nodes.length && <div className="workflow-editor-empty-hint flow-desc">{t("workflows.canvasEmpty")}</div>}
+      </DetailSection>
+
+      <DetailSection title={t("detail.section.isolation")} description={t("workflows.isolationHint")}>
+        <CheckboxField
+          id="isolationEnabled"
+          checked={!!isolation.enabled}
+          onChange={(checked) => updateIsolation({ enabled: checked })}
+          label={t("workflows.isolation.enabled")}
+          hint={isolation.enabled ? t("workflows.isolation.enabledHint") : ""}
+        />
+        {isolation.enabled && (
+          <>
+            <TextInput
+              label={t("workflows.isolation.testCommand")}
+              placeholder={t("workflows.isolation.testCommand.placeholder")}
+              value={isolation.testCommand || ""}
+              onChange={(e) => updateIsolation({ testCommand: e.target.value })}
+            />
+            <HelperText>{t("workflows.isolation.testCommandHint")}</HelperText>
+            <CheckboxField
+              id="isolationKeepOnFailure"
+              checked={isolation.keepOnFailure !== false}
+              onChange={(checked) => updateIsolation({ keepOnFailure: checked })}
+              label={t("workflows.isolation.keepOnFailure")}
+              hint={t("workflows.isolation.keepOnFailureHint")}
+            />
+            <HelperText>{t("workflows.isolation.caveat")}</HelperText>
+          </>
+        )}
       </DetailSection>
     </DetailPage>
   );

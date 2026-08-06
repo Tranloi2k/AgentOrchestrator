@@ -55,6 +55,11 @@
         "y": 118
       }
     ],
-    "edges": []
+    "edges": [],
+    "isolation": {
+      "enabled": false,
+      "testCommand": "",
+      "keepOnFailure": true
+    }
   }
 ]
