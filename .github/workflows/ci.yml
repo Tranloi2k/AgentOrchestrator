@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build client
+        run: npm run build:client
+
+      - name: Check server syntax
+        run: |
+          node --check server/index.js
+          node --check server/orchestrator.js
+          node --check server/mcp-bridge.js
+          node --check server/workspace.js
+
+      - name: Smoke test API
+        run: |
+          npm run start -w server &
+          SERVER_PID=$!
+          cleanup() {
+            kill "$SERVER_PID" 2>/dev/null || true
+            wait "$SERVER_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:5175/api/meta > /tmp/meta.json; then
+              node -e "
+                const data = JSON.parse(require('fs').readFileSync('/tmp/meta.json', 'utf8'));
+                if (!Array.isArray(data.providers)) throw new Error('missing providers');
+                if (!data.defaultCwd) throw new Error('missing defaultCwd');
+                console.log('API meta OK');
+              "
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Server did not become ready in time" >&2
+          exit 1
