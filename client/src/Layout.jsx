@@ -6,6 +6,7 @@ import {
   IconSkill,
   IconWorkflow,
   IconPlugin,
+  IconUsage,
   IconBook,
   IconLogo,
   IconTranslate,
@@ -22,12 +23,13 @@ const NAV_ITEMS = [
   { path: "/skills", icon: IconSkill, labelKey: "nav.skills", descKey: "nav.skills.desc" },
   { path: "/plugins", icon: IconPlugin, labelKey: "nav.plugins", descKey: "nav.plugins.desc" },
   { path: "/workflows", icon: IconWorkflow, labelKey: "nav.workflows", descKey: "nav.workflows.desc" },
+  { path: "/usage", icon: IconUsage, labelKey: "nav.usage", descKey: "nav.usage.desc" },
 ];
 
 const DOCS_ITEM = { path: "/docs", icon: IconBook, labelKey: "nav.docs", descKey: "nav.docs.desc" };
 
 function isNavActive(path, pathname) {
-  if (path === "/run") return pathname === "/run";
+  if (path === "/run") return pathname === path || pathname.startsWith(`${path}/`);
   return pathname === path || pathname.startsWith(`${path}/`);
 }
 

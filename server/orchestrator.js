@@ -6,7 +6,17 @@ import { tmpdir, homedir } from "node:os";
 import spawn from "cross-spawn";
 import { nanoid } from "nanoid";
 import treeKill from "tree-kill";
-import { openWorkspaceSession, createWorktree, integrateWorktree, closeWorkspaceSession } from "./workspace.js";
+import {
+  openWorkspaceSession,
+  createWorktree,
+  integrateWorktree,
+  closeWorkspaceSession,
+  finalizeWorkspaceReview,
+  acceptWorkspaceReview,
+  declineWorkspaceReview,
+} from "./workspace.js";
+import { shouldRenderLogLine } from "./log-utils.js";
+import { classifyAgentFailure, finishDelegation, reserveDelegation } from "./delegation-policy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AGENTS_FILE = path.join(__dirname, "agents.config.json");
@@ -453,6 +463,40 @@ function buildCodexBridgeArgs(env) {
   ];
 }
 
+/**
+ * Same "cancelled, nobody's there to approve" problem as agent-bridge above, but for MCP
+ * servers the user already has registered in their own `~/.codex/config.toml` (e.g. a
+ * `codegraph` server) rather than one we wire in ourselves. `codex exec` has no TTY, so any
+ * tool call on a server that isn't explicitly set to auto-approve comes back
+ * "user cancelled MCP tool call" and the run stalls/fails on that step even though the process
+ * itself keeps going. A per-tool override in the user's config (like
+ * `[mcp_servers.codegraph.tools.codegraph_context]`) only covers the tools listed there — any
+ * other tool on that same server (e.g. `codegraph_explore`) is still unapproved.
+ *
+ * We can't tell in advance which tools an agent will call, so instead of per-tool overrides we
+ * set the server-level default for every *other* server already declared in config.toml —
+ * agent-bridge is excluded since buildCodexBridgeArgs above already covers it, and this only
+ * touches approval mode, nothing about sandboxing or what the server can actually do.
+ */
+function buildExternalMcpApprovalArgs() {
+  let toml;
+  try {
+    toml = readFileSync(path.join(homedir(), ".codex", "config.toml"), "utf-8");
+  } catch {
+    return [];
+  }
+  const names = new Set();
+  for (const m of toml.matchAll(/^\[mcp_servers\.([^.\]]+)\]\s*$/gm)) {
+    if (m[1] && m[1] !== "agent-bridge") names.add(m[1]);
+  }
+  const s = (v) => JSON.stringify(String(v));
+  const args = [];
+  for (const name of names) {
+    args.push("-c", `mcp_servers.${name}.default_tools_approval_mode=${s("approve")}`);
+  }
+  return args;
+}
+
 /** --------------------------- persistence: plugins (real Claude Code plugins) --------------------------- */
 
 function listPlugins() {
@@ -552,6 +596,20 @@ function buildPluginArgs(agent) {
  * server restart (previously in-memory only — lost on every restart). */
 const runs = new Map();
 
+/**
+ * Claude's account-wide rate-limit status, opportunistically captured off the `rate_limit_event`
+ * line every `claude -p --output-format stream-json` call already emits (see runClaudeProcess) —
+ * no extra request, no extra cost, just read off traffic that was happening anyway. It's
+ * account-level, not per-agent/per-run, hence one shared value here rather than living on a task.
+ * Resets to null on server restart and is filled again by the next Claude run; there is no
+ * "fetch it right now for free" call, so the UI shows this as "as of <last run>" rather than live.
+ *
+ * Codex has no equivalent: `codex exec --json` (checked against CLI 0.146.0) never emits a
+ * rate-limit/quota event — its help output has no `codex usage`/`codex quota` subcommand either.
+ * So this stays Claude-only; the client is told to say so rather than fabricate a Codex number.
+ */
+let lastClaudeQuota = null;
+
 function saveRuns() {
   try {
     writeFileSync(RUNS_FILE, JSON.stringify([...runs.values()], null, 2), "utf-8");
@@ -585,10 +643,17 @@ function loadRuns() {
       r.error =
         r.error ||
         "Server đã dừng trong khi run này đang chạy dở — tiến trình bị ngắt. Log/kết quả đã có tới lúc đó vẫn được giữ nguyên. " +
-          "Nếu là run theo workflow, bấm \"Chạy tiếp\" để chạy lại từ bước bị gián đoạn thay vì làm lại từ đầu.";
+        "Nếu là run theo workflow, bấm \"Chạy tiếp\" để chạy lại từ bước bị gián đoạn thay vì làm lại từ đầu.";
     }
     for (const t of r.tasks || []) {
       if (t.status === "running") t.status = "error";
+    }
+    for (const delegation of r.delegations || []) {
+      if (delegation.status === "running") {
+        delegation.status = "error";
+        delegation.failureReason = "interrupted";
+        delegation.finishedAt = Date.now();
+      }
     }
     runs.set(r.id, r);
   }
@@ -636,7 +701,7 @@ function killTree(pid, { graceMs = 5000 } = {}) {
     /* the callback's error is expected whenever the tree is already gone */
   });
   if (process.platform === "win32") return;
-  setTimeout(() => treeKill(pid, "SIGKILL", () => {}), graceMs).unref();
+  setTimeout(() => treeKill(pid, "SIGKILL", () => { }), graceMs).unref();
 }
 
 /**
@@ -677,10 +742,13 @@ function emit(event) {
 }
 
 function pushTaskLog(runId, taskId, line) {
+  const normalized = String(line || "").trim();
+  if (!shouldRenderLogLine(normalized)) return;
+
   const run = runs.get(runId);
   const task = run?.tasks.find((t) => t.id === taskId);
-  if (task) task.log.push(line);
-  emit({ runId, taskId, type: "log", line });
+  if (task) task.log.push(normalized);
+  emit({ runId, taskId, type: "log", line: normalized });
 }
 
 function listRuns() {
@@ -689,7 +757,13 @@ function listRuns() {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
-function summarize(run) {
+function summarize(run, { includeReviewPatch = false } = {}) {
+  const review = run.review
+    ? {
+      ...run.review,
+      patch: includeReviewPatch ? run.review.patch || "" : undefined,
+    }
+    : null;
   return {
     id: run.id,
     prompt: run.prompt,
@@ -704,6 +778,7 @@ function summarize(run) {
     createdAt: run.createdAt,
     stopping: run.status === "running" && isCancelling(run.id),
     resumable: canResume(run),
+    review,
     tasks: run.tasks.map((t) => ({
       id: t.id,
       nodeId: t.nodeId || null,
@@ -712,13 +787,119 @@ function summarize(run) {
       status: t.status,
       log: t.log,
       resultText: t.resultText,
+      provider: t.provider || null,
+      agentId: t.agentId || null,
+      agentName: t.agentName || null,
+      workItemId: t.workItemId || null,
+      parentWorkItemId: t.parentWorkItemId || null,
+      failureReason: t.failureReason || null,
+      usage: t.usage || null,
     })),
+  };
+}
+
+/**
+ * Rolls up every task's `usage` (see normalizeClaudeUsage/normalizeCodexUsage) across all
+ * persisted runs into per-provider totals, plus a per-agent breakdown so "which agent burns the
+ * most tokens" is answerable without scraping run history by hand. Recomputed on each request
+ * rather than kept as a running counter — usage figures live on the tasks themselves (already
+ * persisted in runs.json), so this is just an aggregate view over data that already exists, and
+ * staying stateless means deleting/clearing run history is automatically reflected too.
+ */
+function getUsageSummary() {
+  const empty = () => ({
+    tasks: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    costUsd: 0,
+    hasCost: false,
+    durationMs: 0,
+  });
+  const byProvider = { claude: empty(), codex: empty() };
+  const byAgent = new Map(); // agentId -> { agentId, agentName, provider, ...empty() }
+
+  for (const run of runs.values()) {
+    for (const t of run.tasks) {
+      const u = t.usage;
+      if (!u || !byProvider[u.provider]) continue;
+
+      const p = byProvider[u.provider];
+      p.tasks++;
+      p.inputTokens += u.inputTokens || 0;
+      p.outputTokens += u.outputTokens || 0;
+      p.cacheReadTokens += u.cacheReadTokens || 0;
+      p.cacheCreationTokens += u.cacheCreationTokens || 0;
+      p.durationMs += u.durationMs || 0;
+      if (typeof u.costUsd === "number") {
+        p.costUsd += u.costUsd;
+        p.hasCost = true;
+      }
+
+      const agentKey = t.agentId || `unknown-${u.provider}`;
+      if (!byAgent.has(agentKey)) {
+        byAgent.set(agentKey, {
+          agentId: t.agentId || null,
+          agentName: t.agentName || "(agent đã xoá)",
+          provider: u.provider,
+          ...empty(),
+        });
+      }
+      const a = byAgent.get(agentKey);
+      a.tasks++;
+      a.inputTokens += u.inputTokens || 0;
+      a.outputTokens += u.outputTokens || 0;
+      a.cacheReadTokens += u.cacheReadTokens || 0;
+      a.cacheCreationTokens += u.cacheCreationTokens || 0;
+      a.durationMs += u.durationMs || 0;
+      if (typeof u.costUsd === "number") {
+        a.costUsd += u.costUsd;
+        a.hasCost = true;
+      }
+    }
+  }
+
+  return {
+    byProvider,
+    byAgent: [...byAgent.values()].sort((a, b) => b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens)),
+    quota: {
+      // { status, resetsAt, rateLimitType, utilization, isUsingOverage, updatedAt } | null — see
+      // lastClaudeQuota above for why this is opportunistic/account-wide rather than live-fetched.
+      claude: lastClaudeQuota,
+      // Not a bug we can fix client-side: codex exec --json has no rate-limit event to read.
+      codexAvailable: false,
+    },
   };
 }
 
 function getRun(runId) {
   const run = runs.get(runId);
-  return run ? summarize(run) : null;
+  return run ? summarize(run, { includeReviewPatch: true }) : null;
+}
+
+async function acceptRunReview(runId) {
+  const run = runs.get(runId);
+  if (!run) return false;
+  if (run.status === "running") throw new Error("Run vẫn đang chạy.");
+  if (run.review?.status !== "pending") throw new Error("Run không có thay đổi đang chờ review.");
+  await acceptWorkspaceReview(run.review);
+  run.review = { ...run.review, status: "accepted", decidedAt: Date.now() };
+  emit({ runId, type: "review-status", status: "accepted" });
+  saveRuns();
+  return true;
+}
+
+async function declineRunReview(runId) {
+  const run = runs.get(runId);
+  if (!run) return false;
+  if (run.status === "running") throw new Error("Run vẫn đang chạy.");
+  if (run.review?.status !== "pending") throw new Error("Run không có thay đổi đang chờ review.");
+  await declineWorkspaceReview(run.review);
+  run.review = { ...run.review, status: "declined", decidedAt: Date.now() };
+  emit({ runId, type: "review-status", status: "declined" });
+  saveRuns();
+  return true;
 }
 
 /** Deletes one run from history. Refuses to delete a still-`running` run — its spawned CLI
@@ -729,6 +910,9 @@ function deleteRun(id) {
   if (!run) return false;
   if (run.status === "running") {
     throw new Error("Không thể xoá run đang chạy. Đợi run hoàn tất (hoặc lỗi) rồi mới xoá.");
+  }
+  if (run.review?.status === "pending") {
+    throw new Error("Hãy Accept hoặc Decline thay đổi trước khi xoá run.");
   }
   runs.delete(id);
   saveRuns();
@@ -742,7 +926,7 @@ function clearRuns() {
   let cleared = 0;
   let kept = 0;
   for (const [id, run] of runs) {
-    if (run.status === "running") {
+    if (run.status === "running" || run.review?.status === "pending") {
       kept++;
     } else {
       runs.delete(id);
@@ -771,7 +955,7 @@ function runAgentProcess(opts) {
       opts.taskId,
       `❌ CLI "${cmd}" không được cài đặt hoặc không có trong PATH của server. Cài đặt rồi khởi động lại server để dùng provider "${provider}".`
     );
-    return Promise.resolve({ ok: false, resultText: "" });
+    return Promise.resolve({ ok: false, resultText: "", usage: null, failureReason: "provider_unavailable" });
   }
   return provider === "codex" ? runCodexProcess(opts) : runClaudeProcess(opts);
 }
@@ -816,6 +1000,10 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
     trackChild(runId, child);
     let buffer = "";
     let resultText = "";
+    let usage = null;
+    let stderrText = "";
+    let quotaSignal = false;
+    const startedAt = Date.now();
 
     const pushLog = (line) => pushTaskLog(runId, taskId, line);
 
@@ -839,8 +1027,17 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
           } else if (evt.type === "result") {
             resultText = evt.result || "";
             pushLog(`✅ Kết quả cuối:\n${resultText}`);
+            // The final `result` event is the one place Claude reports what the whole turn
+            // (all iterations, including any subagents) actually cost — token counts and
+            // total_cost_usd aren't on the per-message `assistant` events above.
+            usage = normalizeClaudeUsage(evt, Date.now() - startedAt);
           } else if (evt.type === "system") {
             pushLog(`ℹ️ ${evt.subtype || "system"}`);
+          } else if (evt.type === "rate_limit_event" && evt.rate_limit_info) {
+            const r = evt.rate_limit_info;
+            lastClaudeQuota = { ...r, updatedAt: Date.now() };
+            quotaSignal ||= Number(r.utilization) >= 1;
+            pushLog(`ℹ️ Quota Claude (${r.rateLimitType}): đã dùng ${Math.round((r.utilization || 0) * 100)}%`);
           }
         } catch {
           pushLog(line);
@@ -849,18 +1046,47 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
     });
 
     child.stderr.on("data", (chunk) => {
-      pushLog(`⚠️ ${chunk.toString().trim()}`);
+      const text = chunk.toString();
+      stderrText += text;
+      pushLog(`⚠️ ${text.trim()}`);
     });
 
     child.on("error", (err) => {
       pushLog(`❌ Lỗi khởi chạy claude CLI: ${err.message}`);
-      resolve({ ok: false, resultText: "" });
+      resolve({
+        ok: false,
+        resultText: "",
+        usage: null,
+        failureReason: classifyAgentFailure({ spawnError: err, exitCode: 1, stderr: stderrText }),
+      });
     });
 
     child.on("close", (code) => {
-      resolve({ ok: code === 0, resultText });
+      resolve({
+        ok: code === 0,
+        resultText,
+        usage,
+        failureReason: classifyAgentFailure({ exitCode: code, stderr: stderrText, resultText, quotaSignal }),
+      });
     });
   });
+}
+
+/** Normalizes the `usage`/`total_cost_usd` fields off Claude's final stream-json `result` event
+ * into the same {provider, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens,
+ * costUsd, durationMs} shape runCodexProcess produces, so usage stats can be summed across
+ * providers without every call site knowing the two CLIs' native field names. */
+function normalizeClaudeUsage(evt, wallDurationMs) {
+  const u = evt?.usage || {};
+  return {
+    provider: "claude",
+    inputTokens: Number(u.input_tokens) || 0,
+    outputTokens: Number(u.output_tokens) || 0,
+    cacheReadTokens: Number(u.cache_read_input_tokens) || 0,
+    cacheCreationTokens: Number(u.cache_creation_input_tokens) || 0,
+    costUsd: typeof evt?.total_cost_usd === "number" ? evt.total_cost_usd : null,
+    durationMs: typeof evt?.duration_ms === "number" ? evt.duration_ms : wallDurationMs,
+  };
 }
 
 /**
@@ -915,6 +1141,7 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent, node, workflow, de
 
     const bridgeEnv = buildAgentBridgeContext(node, workflow, { runId, taskId, cwd, depth });
     if (bridgeEnv) args.push(...buildCodexBridgeArgs(bridgeEnv));
+    args.push(...buildExternalMcpApprovalArgs());
 
     // Codex is fussy about its argv (see the stdin note above) and its errors point at the
     // wrong flag when something is off, so keep a way to see exactly what was spawned.
@@ -929,6 +1156,9 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent, node, workflow, de
     child.stdin.end(fullPrompt);
     const pushLog = (line) => pushTaskLog(runId, taskId, line);
     let buffer = "";
+    let usage = null;
+    let stderrText = "";
+    const startedAt = Date.now();
 
     child.stdout.on("data", (chunk) => {
       buffer += chunk.toString();
@@ -939,6 +1169,13 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent, node, workflow, de
         if (!line) continue;
         try {
           const evt = JSON.parse(line);
+          // `turn.completed` is where Codex reports the turn's token usage (no cost — `codex
+          // exec` doesn't surface pricing at all, unlike Claude's total_cost_usd). Silent
+          // otherwise: this event carries no message text worth logging.
+          if (evt.type === "turn.completed" && evt.usage) {
+            usage = normalizeCodexUsage(evt, Date.now() - startedAt);
+            continue;
+          }
           const toolLine = describeCodexToolCall(evt);
           if (toolLine !== null) {
             if (toolLine) pushLog(toolLine);
@@ -953,7 +1190,9 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent, node, workflow, de
     });
 
     child.stderr.on("data", (chunk) => {
-      pushLog(`⚠️ ${chunk.toString().trim()}`);
+      const text = chunk.toString();
+      stderrText += text;
+      pushLog(`⚠️ ${text.trim()}`);
     });
 
     child.on("error", (err) => {
@@ -963,7 +1202,12 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent, node, workflow, de
       } catch {
         /* ignore */
       }
-      resolve({ ok: false, resultText: "" });
+      resolve({
+        ok: false,
+        resultText: "",
+        usage: null,
+        failureReason: classifyAgentFailure({ spawnError: err, exitCode: 1, stderr: stderrText }),
+      });
     });
 
     child.on("close", (code) => {
@@ -979,9 +1223,30 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent, node, workflow, de
         /* ignore */
       }
       if (resultText) pushLog(`✅ Kết quả cuối:\n${resultText}`);
-      resolve({ ok: code === 0, resultText });
+      resolve({
+        ok: code === 0,
+        resultText,
+        usage,
+        failureReason: classifyAgentFailure({ exitCode: code, stderr: stderrText, resultText }),
+      });
     });
   });
+}
+
+/** Same normalization as normalizeClaudeUsage, off Codex's `turn.completed` event. Codex
+ * exposes no pricing info via `codex exec`, so costUsd stays null rather than guessing at a
+ * $/token rate that would go stale the moment OpenAI changes pricing. */
+function normalizeCodexUsage(evt, wallDurationMs) {
+  const u = evt?.usage || {};
+  return {
+    provider: "codex",
+    inputTokens: Number(u.input_tokens) || 0,
+    outputTokens: Number(u.output_tokens) || 0,
+    cacheReadTokens: Number(u.cached_input_tokens) || 0,
+    cacheCreationTokens: Number(u.cache_write_input_tokens) || 0,
+    costUsd: null,
+    durationMs: wallDurationMs,
+  };
 }
 
 /**
@@ -1063,8 +1328,24 @@ async function decomposePrompt({ runId, taskId, prompt, cwd }) {
   return [prompt];
 }
 
-function newTask(title, kind, nodeId = null) {
-  return { id: nanoid(8), nodeId, title, kind, status: "pending", log: [], resultText: "" };
+// `agent` is optional and only meaningful for task kinds that actually spawn a CLI (agent,
+// agent-call, workflow-node, workflow-router) — recorded up front (not just usage, after the
+// fact) so a task still shows which provider/agent it ran under even if the process errors out
+// before producing any usage numbers. See getUsageSummary() for how this rolls up.
+function newTask(title, kind, nodeId = null, agent = null) {
+  return {
+    id: nanoid(8),
+    nodeId,
+    title,
+    kind,
+    status: "pending",
+    log: [],
+    resultText: "",
+    provider: agent ? (agent.provider === "codex" ? "codex" : "claude") : null,
+    agentId: agent?.id || null,
+    agentName: agent?.name || null,
+    usage: null,
+  };
 }
 
 /**
@@ -1076,7 +1357,7 @@ function newTask(title, kind, nodeId = null) {
  * the same run (visible in the UI right alongside whatever triggered it), and returns the
  * callee's full answer text back to the caller's `ask_agent` tool call so it can continue.
  */
-async function askAgent({ runId, workflowId, callerNodeId, targetNodeId, question, cwd, depth }) {
+async function askAgent({ runId, workflowId, callerNodeId, targetNodeId, question, workItemId, parentWorkItemId, cwd, depth }) {
   const run = runs.get(runId);
   if (!run) throw new Error("Run không tồn tại (có thể đã kết thúc).");
   if (depth >= MAX_CALL_DEPTH) throw new Error("Đã đạt giới hạn độ sâu gọi agent (chống vòng lặp gọi nhau).");
@@ -1093,29 +1374,52 @@ async function askAgent({ runId, workflowId, callerNodeId, targetNodeId, questio
   if (!targetNode) throw new Error("Bước đích không còn tồn tại trong workflow.");
   const targetAgent = getAgent(targetNode.agentId);
 
-  const task = newTask(`💬 ${nodeTitle(callerNode)} hỏi ${nodeTitle(targetNode)}`, "agent-call", targetNode.id);
+  const task = newTask(`💬 ${nodeTitle(callerNode)} giao [${workItemId}] cho ${nodeTitle(targetNode)}`, "agent-call", targetNode.id, targetAgent);
+  const delegation = reserveDelegation(run, {
+    callerNodeId,
+    targetNodeId,
+    workItemId,
+    parentWorkItemId,
+    question,
+    assignmentId: task.id,
+  });
+  task.workItemId = delegation.workItemId;
+  task.parentWorkItemId = delegation.parentWorkItemId;
   run.tasks.push(task);
   emit({ runId, taskId: task.id, type: "task-created", task });
   task.status = "running";
   emit({ runId, taskId: task.id, type: "task-status", status: "running" });
   pushTaskLog(runId, task.id, `❓ ${question}`);
 
-  const { ok, resultText } = await runAgentProcess({
-    runId,
-    taskId: task.id,
-    prompt: question,
-    cwd,
-    agent: targetAgent,
-    node: targetNode,
-    workflow,
-    depth: depth + 1,
-  });
+  let processResult;
+  try {
+    processResult = await runAgentProcess({
+      runId,
+      taskId: task.id,
+      prompt: question,
+      cwd,
+      agent: targetAgent,
+      node: targetNode,
+      workflow,
+      depth: depth + 1,
+    });
+  } catch (err) {
+    pushTaskLog(runId, task.id, `❌ Lỗi nội bộ khi chạy agent: ${err.message}`);
+    processResult = { ok: false, resultText: "", usage: null, failureReason: "agent_error" };
+  }
+  const { ok, resultText, usage, failureReason } = processResult;
 
   task.resultText = resultText;
+  task.usage = usage;
+  task.failureReason = failureReason || null;
   task.status = isCancelling(runId) ? "cancelled" : ok ? "done" : "error";
+  finishDelegation(delegation, {
+    ok: task.status === "done",
+    failureReason: task.status === "cancelled" ? "cancelled" : failureReason,
+  });
   emit({ runId, taskId: task.id, type: "task-status", status: task.status });
 
-  return resultText;
+  return { answer: resultText, ok: task.status === "done", failureReason: task.failureReason };
 }
 
 /** --------------------------- ad-hoc single-agent run (optionally auto-decomposed) --------------------------- */
@@ -1149,48 +1453,67 @@ async function startRun({ prompt, agentId, decompose, cwd }) {
 }
 
 async function executeRun(run, agent) {
-  const { id: runId, prompt, cwd, decompose } = run;
-
-  let subtasks = [prompt];
-
-  if (decompose) {
-    const plannerTask = newTask("Planner: chia nhỏ yêu cầu", "planner");
-    run.tasks.push(plannerTask);
-    emit({ runId, taskId: plannerTask.id, type: "task-created", task: plannerTask });
-    plannerTask.status = "running";
-    emit({ runId, taskId: plannerTask.id, type: "task-status", status: "running" });
-
-    subtasks = await decomposePrompt({ runId, taskId: plannerTask.id, prompt, cwd });
-
-    plannerTask.status = isCancelling(runId) ? "cancelled" : "done";
-    emit({ runId, taskId: plannerTask.id, type: "task-status", status: plannerTask.status });
+  const { id: runId, prompt, decompose } = run;
+  const { workspace, fatal } = await openRunWorkspace(run, { isolation: {} });
+  if (!workspace && fatal) {
+    run.status = "error";
+    run.error = run.review?.reason;
+    cancelling.delete(runId);
+    emit({ runId, type: "run-status", status: "error", error: run.error });
+    return;
   }
+  // No workspace = not a git repo, so there's nothing to review against: run where the user
+  // pointed us, same as before review existed.
+  const executionCwd = workspace ? workspace.session.reviewDir : run.cwd;
 
-  for (const subPrompt of subtasks) {
-    // Stopping between subtasks: nothing is running to kill, so the loop itself has to notice.
-    if (isCancelling(runId)) break;
+  // Same shape as executeWorkflowRun: whatever happens in the body, the review has to be sealed
+  // and the session torn down. Skipping it would strand the agent's work in a worktree the user
+  // has no way to reach — no diff shown, no Accept, no Decline.
+  try {
+    let subtasks = [prompt];
 
-    const task = newTask(subPrompt, "agent");
-    run.tasks.push(task);
-    emit({ runId, taskId: task.id, type: "task-created", task });
-    task.status = "running";
-    emit({ runId, taskId: task.id, type: "task-status", status: "running" });
+    if (decompose) {
+      const plannerTask = newTask("Planner: chia nhỏ yêu cầu", "planner");
+      run.tasks.push(plannerTask);
+      emit({ runId, taskId: plannerTask.id, type: "task-created", task: plannerTask });
+      plannerTask.status = "running";
+      emit({ runId, taskId: plannerTask.id, type: "task-status", status: "running" });
 
-    const { ok, resultText } = await runAgentProcess({
-      runId,
-      taskId: task.id,
-      prompt: subPrompt,
-      cwd,
-      agent,
-    });
+      subtasks = await decomposePrompt({ runId, taskId: plannerTask.id, prompt, cwd: executionCwd });
 
-    task.resultText = resultText;
-    task.status = isCancelling(runId) ? "cancelled" : ok ? "done" : "error";
-    emit({ runId, taskId: task.id, type: "task-status", status: task.status });
+      plannerTask.status = isCancelling(runId) ? "cancelled" : "done";
+      emit({ runId, taskId: plannerTask.id, type: "task-status", status: plannerTask.status });
+    }
+
+    for (const subPrompt of subtasks) {
+      // Stopping between subtasks: nothing is running to kill, so the loop itself has to notice.
+      if (isCancelling(runId)) break;
+
+      const task = newTask(subPrompt, "agent", null, agent);
+      run.tasks.push(task);
+      emit({ runId, taskId: task.id, type: "task-created", task });
+      task.status = "running";
+      emit({ runId, taskId: task.id, type: "task-status", status: "running" });
+
+      const { ok, resultText, usage } = await runAgentProcess({
+        runId,
+        taskId: task.id,
+        prompt: subPrompt,
+        cwd: executionCwd,
+        agent,
+      });
+
+      task.resultText = resultText;
+      task.usage = usage;
+      task.status = isCancelling(runId) ? "cancelled" : ok ? "done" : "error";
+      emit({ runId, taskId: task.id, type: "task-status", status: task.status });
+    }
+
+    run.status = isCancelling(runId) ? "cancelled" : "done";
+  } finally {
+    cancelling.delete(runId);
+    if (workspace) await finalizeRunReview(run, workspace);
   }
-
-  run.status = isCancelling(runId) ? "cancelled" : "done";
-  cancelling.delete(runId);
   emit({ runId, type: "run-status", status: run.status });
 }
 
@@ -1269,6 +1592,7 @@ function checkpointStateFor(saved) {
 /** True when a stopped/crashed/failed workflow run still has nodes that never completed. */
 function canResume(run) {
   if (!run || run.status === "running" || !run.workflowId) return false;
+  if (["pending", "declined"].includes(run.review?.status)) return false;
   const nodes = (run.workflowNodes || []).filter((n) => n.autoStart !== false);
   if (!nodes.length) return false;
   const saved = run.checkpoint?.nodeStates || {};
@@ -1345,21 +1669,27 @@ function pickRoute(resultText, outgoingEdges) {
   return fallback || outgoingEdges[0];
 }
 
-/** Opens the git-worktree isolation session for a run (see server/workspace.js), plus the
- * "Workspace" task its setup/teardown logs go into. Returns null when isolation is off for
- * this workflow, or when it can't apply (cwd isn't a git repo) — the caller then runs every
- * node in the shared cwd exactly as before. */
+/** Opens the git-worktree review session for a run (see server/workspace.js), plus the
+ * "Workspace" task its setup/teardown logs go into.
+ *
+ * Returns `{ workspace, fatal }`. A null `workspace` splits two very different cases, and the
+ * distinction comes from workspace.js rather than being guessed here:
+ *   - `fatal: false` — the working directory just isn't a git repo. There is nothing to review
+ *     against and nothing to protect, so the run goes ahead in `run.cwd` exactly as it did
+ *     before review existed. Refusing here would mean the app couldn't touch a non-git folder
+ *     at all.
+ *   - `fatal: true`  — review should have applied and couldn't (dirty repo, git failure).
+ *     Running anyway would edit files we can neither isolate nor roll back, so the caller stops.
+ */
 async function openRunWorkspace(run, workflow) {
-  if (!workflow.isolation?.enabled) return null;
-
-  const task = newTask("🗂️ Không gian làm việc (git worktree)", "workspace");
+  const task = newTask("🗂️ Workspace review (git worktree)", "workspace");
   run.tasks.push(task);
   emit({ runId: run.id, taskId: task.id, type: "task-created", task });
   task.status = "running";
   emit({ runId: run.id, taskId: task.id, type: "task-status", status: "running" });
 
   const log = (line) => pushTaskLog(run.id, task.id, line);
-  const session = await openWorkspaceSession({
+  const { session, fatal, reason } = await openWorkspaceSession({
     cwd: run.cwd,
     runId: run.id,
     isolation: workflow.isolation,
@@ -1367,22 +1697,69 @@ async function openRunWorkspace(run, workflow) {
   });
 
   if (!session) {
-    task.status = "skipped";
-    emit({ runId: run.id, taskId: task.id, type: "task-status", status: "skipped" });
-    return null;
+    run.review = { status: "unavailable", reason };
+    task.status = fatal ? "error" : "skipped";
+    emit({ runId: run.id, taskId: task.id, type: "task-status", status: task.status });
+    return { workspace: null, fatal };
   }
   log(
-    `Cách ly đang BẬT. Repo: ${session.repoRoot} · nhánh gốc: ${session.baseBranch}\n` +
-      `Mỗi nhánh chạy song song sẽ có worktree riêng; sau khi xong sẽ commit → ${
-        session.testCommand ? `chạy \`${session.testCommand}\`` : "(không cấu hình kiểm thử)"
-      } → gộp về nhánh gốc → dọn dẹp.`
+    `Review an toàn đang BẬT. Agent làm việc trên nhánh ${session.reviewBranch}; ` +
+    `nhánh ${session.baseBranch} chỉ thay đổi sau khi bạn bấm Accept.`
   );
-  return { session, taskId: task.id, log };
+  return { workspace: { session, taskId: task.id, log }, fatal: false };
 }
 
-/** Opens (and always closes) the isolation session around the actual graph walk. */
+/**
+ * Turns the review worktree into the run's reviewable diff and tears the session down.
+ *
+ * Runs from the callers' `finally`, so it must not throw: an exception raised here would replace
+ * whatever actually killed the run with a git error, and skip the teardown besides. A failure to
+ * produce the diff is therefore recorded as an `unavailable` review carrying its own reason.
+ */
+async function finalizeRunReview(run, workspace, keptDirs = []) {
+  try {
+    run.review = await finalizeWorkspaceReview(workspace.session, workspace.log);
+    if (run.review.status === "pending") {
+      workspace.log(
+        keptDirs.length
+          ? `🔎 Có ${run.review.files.length} file thay đổi đang chờ Accept hoặc Decline. Còn ${keptDirs.length} workspace lỗi được giữ lại để kiểm tra.`
+          : `🔎 Có ${run.review.files.length} file thay đổi đang chờ Accept hoặc Decline.`
+      );
+    } else {
+      workspace.log("ℹ️ Run không thay đổi file nào.");
+    }
+  } catch (err) {
+    run.review = {
+      status: "unavailable",
+      reason: `Không dựng được bản review cho run này: ${err.message}. Nhánh ${workspace.session.reviewBranch} vẫn còn trong repo nếu bạn muốn tự xem.`,
+    };
+    workspace.log(`❌ ${run.review.reason}`);
+  }
+
+  try {
+    await closeWorkspaceSession(workspace.session, keptDirs);
+  } catch {
+    /* teardown is best-effort; `git worktree prune` failing must not sink the run */
+  }
+
+  const wsTask = run.tasks.find((t) => t.id === workspace.taskId);
+  if (wsTask?.status === "running") {
+    wsTask.status = run.review.status === "unavailable" ? "error" : "done";
+    emit({ runId: run.id, taskId: wsTask.id, type: "task-status", status: wsTask.status });
+  }
+  emit({ runId: run.id, type: "review-status", status: run.review.status });
+}
+
+/** Opens (and always closes) the review session around the actual graph walk. */
 async function executeWorkflowRun(run, workflow) {
-  const workspace = await openRunWorkspace(run, workflow);
+  const { workspace, fatal } = await openRunWorkspace(run, workflow);
+  if (!workspace && fatal) {
+    run.status = "error";
+    run.error = run.review?.reason;
+    cancelling.delete(run.id);
+    emit({ runId: run.id, type: "run-status", status: "error", error: run.error });
+    return;
+  }
   // Worktrees deliberately left on disk (failed tests / merge conflicts) — closeWorkspaceSession
   // must not sweep the run's worktree root while any of these are still there.
   const keptDirs = [];
@@ -1391,19 +1768,7 @@ async function executeWorkflowRun(run, workflow) {
   } finally {
     // The run is over one way or another; a later resume must not inherit the stop flag.
     cancelling.delete(run.id);
-    if (workspace) {
-      await closeWorkspaceSession(workspace.session, keptDirs);
-      const wsTask = run.tasks.find((t) => t.id === workspace.taskId);
-      if (wsTask?.status === "running") {
-        workspace.log(
-          keptDirs.length
-            ? `Hoàn tất. Còn ${keptDirs.length} không gian riêng được giữ lại để kiểm tra (xem log các bước tương ứng).`
-            : "Hoàn tất. Đã dọn sạch mọi worktree và nhánh tạm."
-        );
-        wsTask.status = "done";
-        emit({ runId: run.id, taskId: wsTask.id, type: "task-status", status: "done" });
-      }
-    }
+    if (workspace) await finalizeRunReview(run, workspace, keptDirs);
   }
 }
 
@@ -1522,16 +1887,16 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
 
     for (const n of ready) state.set(n.id, "running");
 
-    // Isolation only kicks in on an actual fan-out: a batch of one node has nobody to collide
-    // with, and paying worktree + test + merge for every step of a linear workflow would be
-    // pure overhead (and would rewrite the repo's history into one commit per step).
-    const isolateBatch = !!workspace && ready.length > 1;
+    // Every node runs away from the checked-out branch. This makes the final diff reviewable
+    // and declineable for linear workflows too, not only for parallel fan-out batches.
+    const isolateBatch = !!workspace;
 
     // Created up-front, before any agent starts, so every branch of the fan-out begins from
     // the same HEAD — not from whatever an earlier sibling happened to have merged already.
     const batch = [];
     for (const n of ready) {
-      const task = newTask(nodeTitle(n), n.kind === "router" ? "workflow-router" : "workflow-node", n.id);
+      const nodeAgent = getAgent(n.agentId);
+      const task = newTask(nodeTitle(n), n.kind === "router" ? "workflow-router" : "workflow-node", n.id, nodeAgent);
       run.tasks.push(task);
       taskIdByNode.set(n.id, task.id);
       emit({ runId, taskId: task.id, type: "task-created", task });
@@ -1539,11 +1904,19 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
       const wt = isolateBatch
         ? await createWorktree(workspace.session, n.id, (line) => pushTaskLog(runId, task.id, line))
         : null;
-      batch.push({ node: n, task, wt, cwd: wt ? wt.dir : cwd });
+      batch.push({ node: n, task, agent: nodeAgent, wt, cwd: wt ? wt.dir : cwd });
     }
 
     await Promise.all(
-      batch.map(async ({ node: n, task, cwd: nodeCwd }) => {
+      batch.map(async ({ node: n, task, agent, wt, cwd: nodeCwd }) => {
+        if (workspace && !wt) {
+          state.set(n.id, "error");
+          task.status = "error";
+          pushTaskLog(runId, task.id, "❌ Không tạo được workspace riêng; đã dừng để bảo vệ nhánh chính.");
+          emit({ runId, taskId: task.id, type: "task-status", status: "error" });
+          checkpointNode(n.id);
+          return;
+        }
         const inc = incomingOf.get(n.id).filter(edgeActive);
         const inputs = inc.map((e) => ({ title: nodeTitle(nodeById.get(e.from)), text: output.get(e.from) || "" }));
         const nodePrompt = buildNodePrompt(n.promptTemplate, prompt, inputs);
@@ -1551,8 +1924,7 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
         task.status = "running";
         emit({ runId, taskId: task.id, type: "task-status", status: "running" });
 
-        const agent = getAgent(n.agentId);
-        const { ok, resultText } = await runAgentProcess({
+        const { ok, resultText, usage } = await runAgentProcess({
           runId,
           taskId: task.id,
           prompt: nodePrompt,
@@ -1563,6 +1935,7 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
         });
 
         task.resultText = resultText;
+        task.usage = usage;
         output.set(n.id, resultText);
 
         if (!ok) {
@@ -1663,6 +2036,9 @@ export {
   deletePlugin,
   listRuns,
   getRun,
+  getUsageSummary,
+  acceptRunReview,
+  declineRunReview,
   deleteRun,
   clearRuns,
   startRun,

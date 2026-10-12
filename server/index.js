@@ -30,6 +30,9 @@ import {
   deletePlugin,
   listRuns,
   getRun,
+  getUsageSummary,
+  acceptRunReview,
+  declineRunReview,
   deleteRun,
   clearRuns,
   startRun,
@@ -189,10 +192,36 @@ app.get("/api/runs", (req, res) => {
   res.json({ runs: listRuns() });
 });
 
+/** Token/cost usage rolled up from run history — per-provider (claude vs codex) and per-agent
+ * totals. See getUsageSummary() in orchestrator.js. */
+app.get("/api/usage", (req, res) => {
+  res.json(getUsageSummary());
+});
+
 app.get("/api/runs/:id", (req, res) => {
   const run = getRun(req.params.id);
   if (!run) return res.status(404).json({ error: "not found" });
   res.json({ run });
+});
+
+app.post("/api/runs/:id/review/accept", async (req, res) => {
+  try {
+    const ok = await acceptRunReview(req.params.id);
+    if (!ok) return res.status(404).json({ error: "not found" });
+    res.json({ run: getRun(req.params.id) });
+  } catch (err) {
+    res.status(409).json({ error: err.message });
+  }
+});
+
+app.post("/api/runs/:id/review/decline", async (req, res) => {
+  try {
+    const ok = await declineRunReview(req.params.id);
+    if (!ok) return res.status(404).json({ error: "not found" });
+    res.json({ run: getRun(req.params.id) });
+  } catch (err) {
+    res.status(409).json({ error: err.message });
+  }
 });
 
 app.delete("/api/runs/:id", (req, res) => {
@@ -266,15 +295,25 @@ app.post("/api/runs/:id/resume", (req, res) => {
  * calls its `ask_agent` MCP tool — this is what makes agent-to-agent calls synchronous
  * (the caller's tool call blocks until this resolves). Not meant to be called from the UI. */
 app.post("/api/internal/ask-agent", async (req, res) => {
-  const { runId, workflowId, callerNodeId, targetNodeId, question, cwd, depth } = req.body || {};
-  if (!runId || !workflowId || !callerNodeId || !targetNodeId || !question) {
-    return res.status(400).json({ error: "thiếu runId/workflowId/callerNodeId/targetNodeId/question" });
+  const { runId, workflowId, callerNodeId, targetNodeId, question, workItemId, parentWorkItemId, cwd, depth } = req.body || {};
+  if (!runId || !workflowId || !callerNodeId || !targetNodeId || !question || !workItemId) {
+    return res.status(400).json({ error: "thiếu runId/workflowId/callerNodeId/targetNodeId/question/workItemId" });
   }
   try {
-    const answer = await askAgent({ runId, workflowId, callerNodeId, targetNodeId, question, cwd, depth: depth || 0 });
-    res.json({ answer });
+    const outcome = await askAgent({
+      runId,
+      workflowId,
+      callerNodeId,
+      targetNodeId,
+      question,
+      workItemId,
+      parentWorkItemId,
+      cwd,
+      depth: depth || 0,
+    });
+    res.json(outcome);
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(409).json({ error: err.message });
   }
 });
 

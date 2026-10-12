@@ -6,6 +6,7 @@ import AgentsTab from "./AgentsTab.jsx";
 import SkillsTab from "./SkillsTab.jsx";
 import PluginsTab from "./PluginsTab.jsx";
 import WorkflowsTab from "./WorkflowsTab.jsx";
+import UsageTab from "./UsageTab.jsx";
 import AgentDetailPage from "./pages/AgentDetailPage.jsx";
 import SkillDetailPage from "./pages/SkillDetailPage.jsx";
 import PluginDetailPage from "./pages/PluginDetailPage.jsx";
@@ -17,7 +18,9 @@ export default function App() {
     <Routes>
       <Route element={<Layout />}>
         <Route path="/" element={<Navigate to="/run" replace />} />
-        <Route path="/run" element={<RunTab />} />
+        <Route path="/run" element={<RunTab view="history" />} />
+        <Route path="/run/new" element={<RunTab view="new" />} />
+        <Route path="/run/:runId" element={<RunTab view="history" />} />
         <Route path="/agents" element={<AgentsTab />} />
         <Route path="/agents/new" element={<AgentDetailPage />} />
         <Route path="/agents/:id" element={<AgentDetailPage />} />
@@ -30,6 +33,7 @@ export default function App() {
         <Route path="/workflows" element={<WorkflowsTab />} />
         <Route path="/workflows/new" element={<WorkflowDetailPage />} />
         <Route path="/workflows/:id" element={<WorkflowDetailPage />} />
+        <Route path="/usage" element={<UsageTab />} />
         <Route path="/docs" element={<DocsPage />} />
         <Route path="*" element={<Navigate to="/run" replace />} />
       </Route>

@@ -43,15 +43,19 @@ server.registerTool(
     title: "Hỏi một agent khác trong workflow",
     description:
       "Gọi trực tiếp một agent khác (1 bước khác) trong CÙNG workflow này, gửi câu hỏi/nhiệm vụ, và CHỜ nhận câu trả lời đầy đủ của nó rồi mới tiếp tục việc của bạn. " +
-      "Dùng khi bạn cần ý kiến, dữ liệu, hoặc kết quả cụ thể từ agent chuyên trách khác trước khi làm tiếp.\n\n" +
+      "Mỗi công việc logic chỉ được thuộc MỘT agent. Giữ nguyên workItemId khi yêu cầu cùng agent làm tiếp/sửa tiếp. " +
+      "Không được giao cùng workItemId cho agent khác, trừ khi lần trước được hệ thống xác nhận thất bại vì hết quota/provider không khả dụng. " +
+      "Nếu chia yêu cầu gốc thành công việc mới thật sự khác, dùng workItemId mới và khai báo parentWorkItemId.\n\n" +
       "Các agent bạn được phép hỏi:\n" +
       (callableList || "(không có)"),
     inputSchema: {
       agentId: z.string().describe("id chính xác của agent muốn hỏi, lấy từ danh sách ở trên"),
       question: z.string().describe("Câu hỏi / nhiệm vụ cụ thể muốn agent đó thực hiện và trả lời"),
+      workItemId: z.string().min(1).max(80).describe("Mã ổn định của một công việc logic, ví dụ feature-login-ui; không đổi mã để giao cùng việc cho agent khác"),
+      parentWorkItemId: z.string().min(1).max(80).optional().describe("Bắt buộc khi đây là subtask mới được tách ra; dùng workItemId của việc cha, hoặc root nếu tách trực tiếp từ yêu cầu gốc"),
     },
   },
-  async ({ agentId, question }) => {
+  async ({ agentId, question, workItemId, parentWorkItemId }) => {
     try {
       const res = await fetch(`${BRIDGE_URL}/api/internal/ask-agent`, {
         method: "POST",
@@ -63,6 +67,8 @@ server.registerTool(
           callerNodeId: CALLER_NODE_ID,
           targetNodeId: agentId,
           question,
+          workItemId,
+          parentWorkItemId,
           cwd: CWD,
           depth: DEPTH,
         }),
@@ -70,6 +76,16 @@ server.registerTool(
       const data = await res.json();
       if (!res.ok) {
         return { content: [{ type: "text", text: `Lỗi: ${data.error || res.statusText}` }], isError: true };
+      }
+      if (!data.ok) {
+        const canFailOver = ["quota", "provider_unavailable"].includes(data.failureReason);
+        const guidance = canFailOver
+          ? ` Có thể gọi agent khác với CÙNG workItemId="${workItemId}" vì hệ thống đã mở khóa failover.`
+          : " Không được giao công việc này cho agent khác; hãy thử lại cùng agent hoặc báo lỗi cho người dùng.";
+        return {
+          content: [{ type: "text", text: `Agent không hoàn thành (${data.failureReason || "agent_error"}).${guidance}` }],
+          isError: true,
+        };
       }
       return { content: [{ type: "text", text: data.answer || "(agent kia không trả lời gì)" }] };
     } catch (err) {

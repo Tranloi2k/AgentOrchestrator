@@ -48,6 +48,17 @@ export function IconPlugin({ size = 16 }) {
   );
 }
 
+export function IconUsage({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+      <path d="M2 13.5h12" strokeLinecap="round" />
+      <rect x="3.5" y="8" width="2.4" height="5" rx="0.5" />
+      <rect x="7.3" y="4.5" width="2.4" height="8.5" rx="0.5" />
+      <rect x="11.1" y="6.5" width="2.4" height="6.5" rx="0.5" />
+    </svg>
+  );
+}
+
 export function IconPlus({ size = 16 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">

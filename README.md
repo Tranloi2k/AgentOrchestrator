@@ -102,6 +102,8 @@ Two-way calls are the interesting one. A node can call another node's agent whil
 
 Every node carries its own id, something like `nwvl6e3`, shown on the canvas and in the node panel with a copy button. That id, not the agent id from the Agents tab, is what `ask_agent` takes.
 
+Every `ask_agent` call also carries a stable `workItemId`. The first call claims that logical work item for one target node; later calls may continue the same work with that same node, but cannot hand it to a different node. Failover is unlocked only when the previous CLI attempt is machine-classified as `quota` or `provider_unavailable`. A genuinely distinct subtask must use a new `workItemId` and an explicit `parentWorkItemId` (`root` means it was split directly from the user's original request). The server also rejects identical normalized task text being relabelled and sent to another agent.
+
 ## The agent bridge
 
 `server/mcp-bridge.js` is a plain stdio MCP server exposing the single `ask_agent` tool, and nothing in it is Claude-specific. Both CLIs run the exact same process; only the flags pointing at it differ, so `buildAgentBridgeContext` produces the environment and `buildClaudeBridgeArgs` / `buildCodexBridgeArgs` wrap it per provider. That means a Codex node can call a Claude node, a Claude node can call a Codex node, and either can call its own kind — all through the same node ids on the canvas, with the same per-node callee permissions and the same `MAX_CALL_DEPTH` guard.

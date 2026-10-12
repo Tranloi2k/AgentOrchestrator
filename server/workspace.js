@@ -17,7 +17,7 @@
  * — this module deliberately knows nothing about runs/tasks/events.
  */
 
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import { spawn as nodeSpawn } from "node:child_process";
 import crossSpawn from "cross-spawn";
@@ -94,31 +94,168 @@ async function isDirty(repoRoot) {
 }
 
 /**
- * Prepares isolation for one workflow run. Returns null (with an explanatory log line) when
- * isolation can't apply — not a git repo, or git itself is unavailable — so the caller can
- * transparently fall back to the shared working directory instead of failing the run.
+ * A worktree only materializes git-*tracked* files, so everything `.gitignore`d — `node_modules`,
+ * `.env`, build caches — is simply absent. That breaks the ordinary "run the tests for me" case
+ * and makes a workflow's own test command close to unusable, since it would have to reinstall
+ * dependencies from scratch on every node of every run.
+ *
+ * So we link the base repo's top-level ignored entries into the worktree. Junctions on Windows
+ * (real symlinks need elevation there; junctions don't) and plain symlinks elsewhere. They stay
+ * invisible to git — the same `.gitignore` that named them is itself tracked, so it carries into
+ * the worktree and keeps `git add -A` from ever picking them up.
+ *
+ * These point at the *shared* originals, deliberately: reinstalling per worktree would cost more
+ * than the isolation is worth. That means an agent running `npm install` mutates the real
+ * `node_modules`, and two parallel agents doing it at once still collide — file isolation is what
+ * worktrees buy you, not dependency isolation.
+ */
+async function linkIgnoredArtifacts(repoRoot, targetDir, log) {
+  // --directory collapses an ignored folder to one entry instead of listing every file under it.
+  const listed = await git(
+    ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"],
+    repoRoot
+  );
+  if (!listed.ok) return;
+
+  const names = new Set();
+  for (const raw of listed.output.split("\n")) {
+    const entry = raw.trim().replace(/\/$/, "");
+    // Top-level only: a nested ignored path (`packages/a/node_modules`) would need its parent
+    // directories created first, and those are tracked dirs git will populate itself.
+    if (!entry || entry.includes("/") || entry === ".git") continue;
+    names.add(entry);
+  }
+
+  const linked = [];
+  for (const name of [...names].slice(0, 50)) {
+    const source = path.join(repoRoot, name);
+    const dest = path.join(targetDir, name);
+    if (!existsSync(source) || existsSync(dest)) continue;
+    try {
+      symlinkSync(source, dest, process.platform === "win32" ? "junction" : "dir");
+      linked.push(name);
+    } catch {
+      // Not fatal: a file (rather than directory) entry, or a filesystem/permission that won't
+      // take links. The agent just won't see that one artefact.
+      try {
+        symlinkSync(source, dest, "file");
+        linked.push(name);
+      } catch {
+        /* give up on this entry */
+      }
+    }
+  }
+  if (linked.length) {
+    log(`🔗 Dùng chung với repo gốc (không được git quản lý): ${linked.join(", ")}`);
+  }
+}
+
+/**
+ * Prepares the review workspace for one run.
+ *
+ * Always returns `{ session, reason }`. A null `session` means no isolation, and `fatal` says
+ * what the caller should do about it:
+ *   - `fatal: false` — isolation simply doesn't apply here (not a git repo). The run proceeds in
+ *     the shared working directory, exactly as it did before review existed.
+ *   - `fatal: true`  — it *should* have applied and didn't (dirty repo, git error). Continuing
+ *     would edit files we can't cleanly separate or roll back, so the caller stops the run.
+ * `reason` is the message shown to the user, so each failure explains its own specific cause
+ * rather than the caller inventing a generic one.
  */
 async function openWorkspaceSession({ cwd, runId, isolation, log }) {
   const repo = await resolveRepo(cwd);
   if (!repo) {
-    log(
-      `⚠️ Bỏ qua cách ly worktree: "${cwd}" không nằm trong một git repository (hoặc không tìm thấy lệnh git). Các nhánh song song sẽ dùng chung thư mục làm việc như trước.`
-    );
-    return null;
+    const reason = `"${cwd}" không nằm trong một git repository (hoặc không tìm thấy lệnh git), nên không tạo được bản review. Agent sẽ ghi thẳng vào thư mục làm việc như trước.`;
+    log(`⚠️ ${reason}`);
+    return { session: null, fatal: false, reason };
   }
   if (await isDirty(repo.root)) {
-    log(
-      `⚠️ Repo "${repo.root}" đang có thay đổi chưa commit. Worktree vẫn được tạo từ HEAD, nhưng bước gộp nhánh có thể thất bại vì đụng các file đang sửa dở — nên commit/stash trước khi chạy.`
-    );
+    const reason = `Repo "${repo.root}" đang có thay đổi chưa commit. Hãy commit hoặc stash trước khi chạy, để hệ thống tách được chính xác thay đổi của agent và Decline an toàn.`;
+    log(`❌ ${reason}`);
+    return { session: null, fatal: true, reason };
   }
+  const rootDir = path.join(path.dirname(repo.root), WORKTREE_DIRNAME, runId);
+  const reviewDir = path.join(rootDir, "review");
+  const reviewBranch = `ao/review-${runId}`;
+  const headResult = await git(["rev-parse", "HEAD"], repo.root);
+  if (!headResult.ok) {
+    const reason = `Không đọc được HEAD của repo "${repo.root}": ${headResult.output || "lỗi git"}`;
+    log(`❌ ${reason}`);
+    return { session: null, fatal: true, reason };
+  }
+  const headCommit = headResult.output.trim();
+
+  try {
+    mkdirSync(rootDir, { recursive: true });
+  } catch {
+    /* git reports a useful error below */
+  }
+  // Clears registrations whose directory is already gone, so the checks below see the truth.
+  await git(["worktree", "prune"], repo.root);
+
+  // A review branch under this run's id already existing means this is a resume (or a restart
+  // after a crash). Its commits ARE the work the checkpoint records as done — recreating the
+  // branch from HEAD would keep those nodes marked done while silently throwing away every file
+  // they wrote. So reuse it, and take the base commit from where it forked rather than from HEAD.
+  const branchExists = (
+    await git(["rev-parse", "--verify", "--quiet", `refs/heads/${reviewBranch}`], repo.root)
+  ).ok;
+  let baseCommit = headCommit;
+
+  if (branchExists) {
+    const forkPoint = await git(["merge-base", "HEAD", reviewBranch], repo.root);
+    if (forkPoint.ok && forkPoint.output.trim()) baseCommit = forkPoint.output.trim();
+
+    // In a worktree `.git` is a file pointing back at the real repo; its absence means the
+    // directory was deleted or never finished being created, while the branch survived.
+    if (!existsSync(path.join(reviewDir, ".git"))) {
+      try {
+        rmSync(reviewDir, { recursive: true, force: true });
+      } catch {
+        /* git reports a useful error below */
+      }
+      const reattached = await git(["worktree", "add", reviewDir, reviewBranch], repo.root);
+      if (!reattached.ok) {
+        const reason = `Không mở lại được workspace review của run này: ${reattached.output || "git worktree add thất bại"}`;
+        log(`❌ ${reason}`);
+        return { session: null, fatal: true, reason };
+      }
+    }
+    log(`♻️ Dùng lại workspace review đã có của run này (nhánh ${reviewBranch}) — thay đổi của các bước đã xong được giữ nguyên.`);
+  } else {
+    if (existsSync(reviewDir)) {
+      await git(["worktree", "remove", "--force", reviewDir], repo.root);
+      try {
+        rmSync(reviewDir, { recursive: true, force: true });
+      } catch {
+        /* git reports a useful error below */
+      }
+    }
+    const created = await git(["worktree", "add", "-b", reviewBranch, reviewDir, headCommit], repo.root);
+    if (!created.ok) {
+      const reason = `Không tạo được workspace review: ${created.output || "git worktree add thất bại"}`;
+      log(`❌ ${reason}`);
+      return { session: null, fatal: true, reason };
+    }
+  }
+
+  await linkIgnoredArtifacts(repo.root, reviewDir, log);
+
   return {
-    repoRoot: repo.root,
-    baseBranch: repo.branch,
-    runId,
-    testCommand: (isolation?.testCommand || "").trim(),
-    keepOnFailure: isolation?.keepOnFailure !== false,
-    // repoRoot's parent — see WORKTREE_DIRNAME.
-    rootDir: path.join(path.dirname(repo.root), WORKTREE_DIRNAME, runId),
+    session: {
+      repoRoot: repo.root,
+      baseBranch: repo.branch,
+      baseCommit,
+      reviewBranch,
+      reviewDir,
+      runId,
+      testCommand: isolation?.enabled ? (isolation?.testCommand || "").trim() : "",
+      keepOnFailure: isolation?.keepOnFailure !== false,
+      // repoRoot's parent — see WORKTREE_DIRNAME.
+      rootDir,
+    },
+    fatal: false,
+    reason: "",
   };
 }
 
@@ -129,7 +266,7 @@ async function openWorkspaceSession({ cwd, runId, isolation, log }) {
  */
 async function createWorktree(session, nodeId, log) {
   const branch = `ao/${session.runId}/${nodeId}`;
-  const dir = path.join(session.rootDir, nodeId);
+  const dir = path.join(session.rootDir, "nodes", nodeId);
   try {
     mkdirSync(session.rootDir, { recursive: true });
   } catch {
@@ -146,12 +283,16 @@ async function createWorktree(session, nodeId, log) {
   }
   await git(["branch", "-D", branch], session.repoRoot); // no-op if it doesn't exist
 
-  const res = await git(["worktree", "add", "-b", branch, dir, "HEAD"], session.repoRoot);
+  const res = await git(
+    ["worktree", "add", "-b", branch, dir, session.reviewBranch],
+    session.repoRoot
+  );
   if (!res.ok) {
     log(`⚠️ Không tạo được worktree cho bước này (${res.output || "git worktree add thất bại"}). Bước sẽ chạy trên thư mục dùng chung.`);
     return null;
   }
-  log(`🌱 Không gian làm việc riêng: ${dir}\n   nhánh tạm: ${branch} (tách từ ${session.baseBranch})`);
+  await linkIgnoredArtifacts(session.repoRoot, dir, log);
+  log(`🌱 Không gian làm việc riêng: ${dir}\n   nhánh tạm: ${branch} (tách từ workspace review)`);
   return { branch, dir, nodeId };
 }
 
@@ -195,16 +336,16 @@ async function runTests(session, wt, log) {
 async function mergeBack(session, wt, log) {
   const res = await git(
     ["merge", "--no-ff", "--no-edit", "-m", `orchestrator: gộp ${wt.branch}`, wt.branch],
-    session.repoRoot
+    session.reviewDir
   );
   if (res.ok) {
-    log(`✅ Đã gộp ${wt.branch} vào ${session.baseBranch}.`);
+    log(`✅ Đã gộp ${wt.branch} vào workspace review.`);
     return { ok: true };
   }
-  await git(["merge", "--abort"], session.repoRoot);
+  await git(["merge", "--abort"], session.reviewDir);
   log(
-    `❌ Gộp nhánh ${wt.branch} vào ${session.baseBranch} bị xung đột — đã huỷ merge, nhánh chính giữ nguyên.\n${res.output}\n` +
-      `   Nhánh tạm vẫn còn: tự giải quyết bằng \`git merge ${wt.branch}\` trong ${session.repoRoot}.`
+    `❌ Gộp nhánh ${wt.branch} vào workspace review bị xung đột — đã huỷ merge, nhánh ${session.baseBranch} vẫn giữ nguyên.\n${res.output}\n` +
+      `   Nhánh tạm vẫn còn: tự giải quyết bằng \`git merge ${wt.branch}\` trong ${session.reviewDir}.`
   );
   return { ok: false };
 }
@@ -273,13 +414,120 @@ async function integrateWorktree(session, wt, { title, agentFailed, log }) {
 async function closeWorkspaceSession(session, keptDirs = []) {
   if (!session) return;
   await git(["worktree", "prune"], session.repoRoot);
-  if (!keptDirs.length) {
-    try {
-      rmSync(session.rootDir, { recursive: true, force: true });
-    } catch {
-      /* the directory may legitimately still hold kept worktrees, or be gone already */
-    }
-  }
+  // The review worktree deliberately remains until the user accepts or declines it.
 }
 
-export { openWorkspaceSession, createWorktree, integrateWorktree, closeWorkspaceSession };
+function parseReviewFiles(nameStatusOutput, numstatOutput) {
+  const counts = new Map();
+  for (const line of numstatOutput.split("\n")) {
+    if (!line) continue;
+    const [added, deleted, ...pathParts] = line.split("\t");
+    const filePath = pathParts.at(-1);
+    if (filePath) {
+      counts.set(filePath, {
+        additions: added === "-" ? null : Number(added) || 0,
+        deletions: deleted === "-" ? null : Number(deleted) || 0,
+      });
+    }
+  }
+  return nameStatusOutput
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [rawStatus, ...paths] = line.split("\t");
+      const filePath = paths.at(-1) || "";
+      return {
+        path: filePath,
+        previousPath: paths.length > 1 ? paths[0] : null,
+        status: rawStatus[0] || "M",
+        ...(counts.get(filePath) || { additions: null, deletions: null }),
+      };
+    });
+}
+
+/** Commits direct edits in the review worktree and freezes a patch for the run history. */
+async function finalizeWorkspaceReview(session, log) {
+  const committed = await commitWorktree(
+    session,
+    { branch: session.reviewBranch, dir: session.reviewDir },
+    `orchestrator: review ${session.runId}`,
+    log
+  );
+  if (!committed.ok) throw new Error(committed.output || "Không commit được workspace review");
+
+  const range = `${session.baseCommit}...${session.reviewBranch}`;
+  const [nameStatus, numstat, patch] = await Promise.all([
+    git(["diff", "--name-status", "--find-renames", range], session.reviewDir),
+    git(["diff", "--numstat", "--find-renames", range], session.reviewDir),
+    git(["diff", "--no-color", "--find-renames", range], session.reviewDir),
+  ]);
+  if (!nameStatus.ok || !numstat.ok || !patch.ok) {
+    throw new Error(nameStatus.output || numstat.output || patch.output || "Không đọc được diff");
+  }
+
+  const files = parseReviewFiles(nameStatus.output, numstat.output);
+  if (!files.length) {
+    await cleanupReviewWorkspace(session);
+    return { status: "no_changes", files: [], patch: "", patchTruncated: false };
+  }
+
+  const maxPatchLength = 1_500_000;
+  const reviewHead = await git(["rev-parse", session.reviewBranch], session.repoRoot);
+  if (!reviewHead.ok) throw new Error(reviewHead.output || "Không đọc được review commit");
+  return {
+    status: "pending",
+    repoRoot: session.repoRoot,
+    baseBranch: session.baseBranch,
+    baseCommit: session.baseCommit,
+    branch: session.reviewBranch,
+    reviewHead: reviewHead.output.trim(),
+    dir: session.reviewDir,
+    files,
+    patch: patch.output.slice(0, maxPatchLength),
+    patchTruncated: patch.output.length > maxPatchLength,
+    createdAt: Date.now(),
+  };
+}
+
+async function cleanupReviewWorkspace(reviewOrSession) {
+  const repoRoot = reviewOrSession.repoRoot;
+  const dir = reviewOrSession.reviewDir || reviewOrSession.dir;
+  const branch = reviewOrSession.reviewBranch || reviewOrSession.branch;
+  if (dir) await git(["worktree", "remove", "--force", dir], repoRoot);
+  await git(["worktree", "prune"], repoRoot);
+  if (branch) await git(["branch", "-D", branch], repoRoot);
+}
+
+async function acceptWorkspaceReview(review) {
+  const currentReviewHead = await git(["rev-parse", review.branch], review.repoRoot);
+  if (!currentReviewHead.ok || currentReviewHead.output.trim() !== review.reviewHead) {
+    throw new Error("Nhánh review đã thay đổi sau khi tạo diff. Hãy review lại trước khi Accept.");
+  }
+  const currentBranch = await git(["rev-parse", "--abbrev-ref", "HEAD"], review.repoRoot);
+  if (!currentBranch.ok || currentBranch.output.trim() !== review.baseBranch) {
+    throw new Error(`Repo phải đang ở nhánh ${review.baseBranch} để Accept.`);
+  }
+  const merged = await git(
+    ["merge", "--no-ff", "--no-edit", "-m", `orchestrator: accept ${review.branch}`, review.branch],
+    review.repoRoot
+  );
+  if (!merged.ok) {
+    await git(["merge", "--abort"], review.repoRoot);
+    throw new Error(`Không thể apply thay đổi: ${merged.output || "git merge thất bại"}`);
+  }
+  await cleanupReviewWorkspace(review);
+}
+
+async function declineWorkspaceReview(review) {
+  await cleanupReviewWorkspace(review);
+}
+
+export {
+  openWorkspaceSession,
+  createWorktree,
+  integrateWorktree,
+  closeWorkspaceSession,
+  finalizeWorkspaceReview,
+  acceptWorkspaceReview,
+  declineWorkspaceReview,
+};

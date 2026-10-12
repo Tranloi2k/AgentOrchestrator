@@ -51,12 +51,16 @@ export const api = {
     ),
   deleteWorkflow: (id) => fetch(`/api/workflows/${id}`, { method: "DELETE" }).then(json),
 
+  getUsage: () => fetch("/api/usage").then(json),
+
   listRuns: () => fetch("/api/runs").then(json),
   getRun: (id) => fetch(`/api/runs/${id}`).then(json),
   deleteRun: (id) => fetch(`/api/runs/${id}`, { method: "DELETE" }).then(json),
   clearRuns: () => fetch("/api/runs", { method: "DELETE" }).then(json),
   stopRun: (id) => fetch(`/api/runs/${id}/stop`, { method: "POST" }).then(json),
   resumeRun: (id) => fetch(`/api/runs/${id}/resume`, { method: "POST" }).then(json),
+  acceptRunReview: (id) => fetch(`/api/runs/${id}/review/accept`, { method: "POST" }).then(json),
+  declineRunReview: (id) => fetch(`/api/runs/${id}/review/decline`, { method: "POST" }).then(json),
   runAgent: (data) =>
     fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json),
   runWorkflow: (data) =>
