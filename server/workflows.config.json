@@ -9,6 +9,12 @@
       "testCommand": "",
       "keepOnFailure": true
     },
+    "inputs": [],
+    "limits": {
+      "timeoutMin": 0,
+      "tokenBudget": 0
+    },
+    "schedules": [],
     "nodes": [
       {
         "id": "ng8n4t0",
@@ -21,6 +27,12 @@
           "nigms9o"
         ],
         "autoStart": true,
+        "name": "",
+        "fallbackAgentIds": [],
+        "retries": 0,
+        "retryDelaySec": 10,
+        "timeoutSec": 0,
+        "tokenBudget": 0,
         "x": -73,
         "y": 154
       },
@@ -33,6 +45,12 @@
           "ng8n4t0"
         ],
         "autoStart": false,
+        "name": "",
+        "fallbackAgentIds": [],
+        "retries": 0,
+        "retryDelaySec": 10,
+        "timeoutSec": 0,
+        "tokenBudget": 0,
         "x": 204,
         "y": 21
       },
@@ -45,6 +63,12 @@
           "ng8n4t0"
         ],
         "autoStart": false,
+        "name": "",
+        "fallbackAgentIds": [],
+        "retries": 0,
+        "retryDelaySec": 10,
+        "timeoutSec": 0,
+        "tokenBudget": 0,
         "x": 206,
         "y": 248
       },
@@ -57,6 +81,12 @@
           "ng8n4t0"
         ],
         "autoStart": false,
+        "name": "",
+        "fallbackAgentIds": [],
+        "retries": 0,
+        "retryDelaySec": 10,
+        "timeoutSec": 0,
+        "tokenBudget": 0,
         "x": 352,
         "y": 118
       }
@@ -73,6 +103,12 @@
       "testCommand": "",
       "keepOnFailure": true
     },
+    "inputs": [],
+    "limits": {
+      "timeoutMin": 0,
+      "tokenBudget": 0
+    },
+    "schedules": [],
     "team": {
       "coordinator": {
         "agentId": "rxCoord1",
@@ -168,6 +204,113 @@
         "teamRole": "member",
         "alias": "reviewer",
         "role": "Reviews one work item: runs checks, compares with the brief, answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED. Never edits files.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      }
+    ],
+    "edges": []
+  },
+  {
+    "id": "ytStudio",
+    "name": "YouTube script studio",
+    "description": "Producer chọn chủ đề, researcher tìm và kiểm chứng, writer viết theo handbook, editor duyệt. Hỗ trợ Shorts và video dài.",
+    "type": "team",
+    "isolation": {
+      "enabled": false,
+      "testCommand": "",
+      "keepOnFailure": true
+    },
+    "inputs": [],
+    "limits": {
+      "timeoutMin": 0,
+      "tokenBudget": 0
+    },
+    "schedules": [],
+    "team": {
+      "coordinator": {
+        "agentId": "ytProd01",
+        "process": "## Read the request\n- Format: \"short\" (default) or \"long\". The user may also ask for several scripts at once; default is 1.\n- Topic: if the user names one, use it. If not, run topic scouting.\n\n## Steps\n1. Topic (only if none was given): ask researcher for topic scouting. Pick the candidate with the strongest result-first hook and the lowest risk notes; if several scripts are requested, pick that many distinct topics.\n2. Fact pack: ask researcher for a fact pack on each chosen topic. One work item per topic.\n3. Draft: give writer a brief per topic with the format, the angle, the hook idea and the full fact pack pasted in. One work item per script; scripts on different topics may run in parallel.\n4. Review: send each draft to editor, together with the fact pack it was built from.\n5. Fix: on VERDICT: CHANGES_REQUESTED, send the blocking issues back to the SAME writer work item. At most 2 fix rounds per script; after that keep the best version and flag it for a human.\n6. Save: once a script has VERDICT: PASS (or is flagged after 2 rounds), ask writer to save it to scripts/.\n\n## Rules\n- Writer and editor never see each other directly; you pass the fact pack and the issues between them.\n- Do not spawn agents to write scripts. Spawned helpers (if available) are only for extra research.\n- Never use an em dash in anything you write.\n\n## Final report (in Vietnamese)\nFor each script:\n- chủ đề, định dạng, lý do chọn (1 câu)\n- đường dẫn file đã lưu\n- số từ và thời lượng ước tính\n- kết quả duyệt và số vòng sửa\n- nguồn chính (2 đến 3 link)\nThen: các giả định đã đặt ra, and anything that needs the owner before recording (for example [NEEDS SOURCE] marks).\n"
+      },
+      "members": [
+        {
+          "alias": "researcher",
+          "agentId": "ytRsrch1",
+          "role": "Finds hot AI/no-code topics (topic scouting) and builds sourced fact packs for a chosen topic. Read-only, uses the web."
+        },
+        {
+          "alias": "writer",
+          "agentId": "ytWritr1",
+          "role": "Writes Shorts or long-form scripts from a brief and fact pack, following the channel handbooks; saves the final version to scripts/."
+        },
+        {
+          "alias": "editor",
+          "agentId": "ytEditr1",
+          "role": "Checks a script against the handbook and the fact pack, spot-checks sources, answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED."
+        }
+      ],
+      "spawnPolicy": {
+        "enabled": false,
+        "providers": [],
+        "claudeModels": [],
+        "codexModels": [],
+        "geminiModels": [],
+        "maxAgents": 3,
+        "tokenBudget": 300000
+      }
+    },
+    "nodes": [
+      {
+        "id": "coordinator",
+        "agentId": "ytProd01",
+        "promptTemplate": "## Read the request\n- Format: \"short\" (default) or \"long\". The user may also ask for several scripts at once; default is 1.\n- Topic: if the user names one, use it. If not, run topic scouting.\n\n## Steps\n1. Topic (only if none was given): ask researcher for topic scouting. Pick the candidate with the strongest result-first hook and the lowest risk notes; if several scripts are requested, pick that many distinct topics.\n2. Fact pack: ask researcher for a fact pack on each chosen topic. One work item per topic.\n3. Draft: give writer a brief per topic with the format, the angle, the hook idea and the full fact pack pasted in. One work item per script; scripts on different topics may run in parallel.\n4. Review: send each draft to editor, together with the fact pack it was built from.\n5. Fix: on VERDICT: CHANGES_REQUESTED, send the blocking issues back to the SAME writer work item. At most 2 fix rounds per script; after that keep the best version and flag it for a human.\n6. Save: once a script has VERDICT: PASS (or is flagged after 2 rounds), ask writer to save it to scripts/.\n\n## Rules\n- Writer and editor never see each other directly; you pass the fact pack and the issues between them.\n- Do not spawn agents to write scripts. Spawned helpers (if available) are only for extra research.\n- Never use an em dash in anything you write.\n\n## Final report (in Vietnamese)\nFor each script:\n- chủ đề, định dạng, lý do chọn (1 câu)\n- đường dẫn file đã lưu\n- số từ và thời lượng ước tính\n- kết quả duyệt và số vòng sửa\n- nguồn chính (2 đến 3 link)\nThen: các giả định đã đặt ra, and anything that needs the owner before recording (for example [NEEDS SOURCE] marks).\n",
+        "kind": "agent",
+        "teamRole": "coordinator",
+        "calleeNodeIds": [
+          "researcher",
+          "writer",
+          "editor"
+        ],
+        "autoStart": true,
+        "spawnPolicy": {
+          "enabled": false,
+          "providers": [],
+          "claudeModels": [],
+          "codexModels": [],
+          "geminiModels": [],
+          "maxAgents": 3,
+          "tokenBudget": 300000
+        }
+      },
+      {
+        "id": "researcher",
+        "agentId": "ytRsrch1",
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "researcher",
+        "role": "Finds hot AI/no-code topics (topic scouting) and builds sourced fact packs for a chosen topic. Read-only, uses the web.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      },
+      {
+        "id": "writer",
+        "agentId": "ytWritr1",
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "writer",
+        "role": "Writes Shorts or long-form scripts from a brief and fact pack, following the channel handbooks; saves the final version to scripts/.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      },
+      {
+        "id": "editor",
+        "agentId": "ytEditr1",
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "editor",
+        "role": "Checks a script against the handbook and the fact pack, spot-checks sources, answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED.",
         "calleeNodeIds": [],
         "autoStart": false
       }

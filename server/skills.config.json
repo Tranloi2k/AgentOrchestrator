@@ -4,5 +4,23 @@
     "name": "Conventional Commits",
     "description": "Chuẩn hoá commit message theo Conventional Commits",
     "content": "Khi commit code, luôn dùng định dạng Conventional Commits: feat:, fix:, docs:, chore:, refactor:. Ví dụ: \"feat: add login form\"."
+  },
+  {
+    "id": "ytChanl1",
+    "name": "NoCode Engineer: channel brief",
+    "description": "Khán giả, chủ đề, CTA, quy tắc hình ảnh và từ ngữ của kênh",
+    "content": "# The NoCode Engineer: channel brief\n\n- Faceless channel on YouTube (Shorts + long-form) and TikTok.\n- Audience: international, English-speaking designers. Goal: get them to build and ship with Framer and similar no-code tools.\n- Topics: hot AI news first (new agent skills, product updates, trending high-star GitHub repos, new AI design tools), then Framer and no-code. Avoid bland evergreen tips.\n- Every video ends with a CTA to the Framer affiliate link in bio.\n- The owner voices every script, so write for speaking: short sentences, contractions, no tongue twisters, no lists read aloud.\n- Visuals are mobile-first: one subject per frame, big text, many frames, smooth motion. Never use split-screen side-by-side comparisons; they are unreadable on a phone. Show before/after as a sequence instead.\n- Never use an em dash anywhere (script, on-screen text, title, description). Use a period, comma or colon.\n- Safe vocabulary: never say hack, crack, bypass, piracy, cheat, exploit, free premium or similar. Say trick, shortcut, workflow, setup.\n- Facts must be checkable: every claim about a product, number, release or repo needs a source link in the research notes.\n"
+  },
+  {
+    "id": "ytShort1",
+    "name": "NoCode Engineer: Shorts handbook",
+    "description": "Quy tắc kịch bản Shorts 35 đến 42 giây",
+    "content": "# Shorts script handbook (YouTube Shorts / TikTok)\n\nLength\n- 35 to 42 seconds of voice-over, about 95 to 105 words. Count the words.\n\nOpening\n- Voice starts on frame 0. No silent intro, no logo.\n- Frame 0 must make sense on its own with on-screen text of 4 words or fewer.\n- Hook is result-first: show or say the outcome before explaining how.\n\nPacing\n- A visual change every 2.5 to 3.5 seconds.\n- On-screen text never repeats the voice-over word for word. It adds a label, a number or a contrast.\n- The climax (the most impressive moment or reveal) lands at 75 to 85% of the runtime.\n\nEnding\n- Seamless loop: the last line flows back into the first frame.\n- Disclaimer and CTA are merged into one line at the end, with no dead air after it.\n\nOutput format\n- Title: 3 options, under 60 characters.\n- Beat table with columns: time | voice-over | on-screen text | visual.\n- Word count and estimated duration.\n- Description (2 to 3 lines) and 3 to 5 hashtags.\n"
+  },
+  {
+    "id": "ytLong01",
+    "name": "NoCode Engineer: long-form guide",
+    "description": "Khung kịch bản video dài 12 đến 20 phút (bản nháp, có thể chỉnh)",
+    "content": "# Long-form script guide (12 to 20 minutes)\n\nDraft defaults. Edit this skill to match how you want long videos to work.\n\nLength\n- About 140 to 150 spoken words per minute: 1,700 to 3,000 words for 12 to 20 minutes.\n\nStructure\n1. Cold open (0:00 to 0:30): the result or the most surprising fact first, then why it matters to a designer. No channel intro.\n2. Promise (about 15 seconds): what the viewer will have or know by the end.\n3. Chapters of 2 to 4 minutes each, every one with its own mini-hook at the start and a clear takeaway at the end.\n4. A re-hook every 60 to 90 seconds: a question, a tease of what comes next, or a pattern break.\n5. One mid-roll mention of the Framer link, placed right after a moment of real value, about 15 seconds.\n6. Recap of the takeaways in under 45 seconds, then the end CTA to the Framer link.\n\nVisuals\n- Same mobile-first rules as Shorts: one subject per frame, big text, no split screen.\n- A visual change at least every 5 to 8 seconds; screen recordings zoomed to the part that matters.\n\nOutput format\n- Title: 3 options, plus a thumbnail text idea (3 words or fewer) for each.\n- Chapter list with timestamps (usable as YouTube chapters).\n- Script by chapter, with a beat table: time | voice-over | on-screen text | visual.\n- Word count per chapter and total, plus estimated duration.\n- Description with chapters, sources and the affiliate disclaimer.\n"
   }
 ]

@@ -63,32 +63,38 @@ The API can start agents in any folder, so it only accepts local requests:
 
 ## Project layout
 
+Both halves are organized by feature: everything one feature needs (UI pages and components on the client; logic, data store and routes on the server) sits in one folder, and only genuinely shared code lives outside `features/`.
+
 ```
 AgentOrchestrator/
-├── client/                 # React + Vite UI
-│   ├── src/
-│   └── public/             # favicon, provider icons
+├── client/src/                     # React + Vite UI
+│   ├── main.jsx, index.css         # entry + global styles
+│   ├── app/                        # shell: routes (App.jsx), Layout, preference/page-meta contexts
+│   ├── shared/                     # api.js, i18n.js, Icons.jsx, assets/, components/ (Button, Modal, …)
+│   └── features/
+│       ├── agents/                 # agent list + form, tool allowlist
+│       ├── workflows/              # list, editor, canvas, run settings; team/ (editor, diagram, spawn policy)
+│       ├── runs/                   # Run tab, chat box, review popup, target-branch picker
+│       ├── skills/  plugins/  usage/  docs/
 ├── server/
-│   ├── index.js            # Express API + WebSocket
-│   ├── security.js         # loopback bind, Origin/Host checks, internal token, ALLOWED_ROOTS
-│   ├── orchestrator.js     # re-exports the modules below as one API
-│   ├── config.js           # model/tool lists, CLI detection, DEFAULT_CWD
-│   ├── registry.js         # agents, workflows, skills, plugins (CRUD + config files)
-│   ├── run-store.js        # run history (runs.json), event bus, usage totals
-│   ├── cli-runners.js      # spawns claude / codex, wires in the ask_agent bridge
-│   ├── executor.js         # runs: workflow graph, router, worktree merge, resume
-│   ├── workspace.js        # git worktree isolation and review
-│   ├── access.js           # access levels and how each provider maps them
-│   ├── spawn-policy.js     # spawn_agent: Team whitelist, per-run limits, supervisor ceiling
-│   ├── workflow-model.js   # workflow types, save-time validation, router labels
-│   ├── mcp-bridge.js       # the ask_agent / spawn_agent MCP tools
-│   ├── agents.config.json
-│   ├── skills.config.json
-│   ├── plugins.config.json
-│   ├── workflows.config.json
-│   └── runs.json           # run history, written by the server
+│   ├── src/
+│   │   ├── index.js                # Express + WebSocket; registers each feature's routes
+│   │   ├── core/                   # config (model lists, CLI detection, paths), security, log utils
+│   │   └── features/               # each: <name>.store.js / logic, <name>.routes.js, tests
+│   │       ├── agents/             # agent store, access levels
+│   │       ├── skills/  plugins/   # stores + routes
+│   │       ├── workflows/          # store, workflow-model (types, validation, routing), node titles
+│   │       ├── runs/               # executor, run store, CLI runners, delegation + spawn policy
+│   │       ├── workspace/          # git worktrees, review, target branch, folder picker
+│   │       ├── schedules/          # cron parser, scheduler
+│   │       ├── bridge/             # mcp-bridge.js (ask_agent / spawn_agent) + internal routes
+│   │       └── meta/               # /api/meta
+│   ├── agents.config.json  skills.config.json  plugins.config.json  workflows.config.json
+│   └── runs.json                   # run history, written by the server (data stays outside src/)
 └── docs/
 ```
+
+Tests sit next to the code they cover and run with `npm test -w server`.
 
 ## Agents
 
@@ -138,13 +144,25 @@ A node can also hand work to another node while it's still running, block until 
 
 Saving is validated on the server, and problems come back as a list (`400 { errors: [{ code, params }] }`) instead of being silently dropped. Examples: a manual node nobody can hand work to, a manual node with edges, a router branch without a label or with a duplicate one, a loop, a hand-written prompt without `{{previous}}` on a node that has input, or a malformed or duplicate member alias.
 
+### Pipeline: reliability, references, loops, limits, schedules
+
+**Retry and failover per step.** Each step can list fallback agents in priority order. When the step's agent fails on quota or an unavailable CLI (the same `classifyAgentFailure` that drives `ask_agent` failover), the next agent in the list takes over at once. Any other failure, a timeout, or a router answer with no valid `ROUTE` line retries the same agent up to `retries` times, waiting `retryDelaySec × attempt` between tries. Every attempt starts from a clean worktree, and they all add to the same task, so its log shows each switch and retry.
+
+**Named references.** Give a step a name and later steps can use its output with `{{nodes.<name>}}` — only steps that always run before it, which the save check enforces. A workflow can declare inputs (name, label, default, required); the Run form and schedules ask for them, and prompts use them as `{{input.<name>}}`. A step with no prompt of its own gets the input values appended to the request.
+
+**Bounded loops.** A branch can be marked "Loop back" with a maximum number of rounds. It must point to an earlier step; everything between the two runs again, and the step it returns to also receives the output that sent it back. If a router still picks the loop branch after the last round, it fails rather than letting unfinished work through; a plain loop branch just carries on. Cycles without a loop branch are still refused.
+
+**Time and token limits.** Per step: a time limit per attempt (the step's process tree is killed when it runs out) and a token budget across its attempts and loop rounds. Per run: a wall-clock limit (stops the run like the Stop button, then reports an error) and a token budget across every task in the run. Tokens are input + output + cache writes. CLIs only report usage when they finish, so token budgets are checked before each attempt or step, not mid-way.
+
+**Schedules.** A workflow can have cron schedules (5 fields, server local time, `@daily` and friends), each with its own request, inputs, folder and target branch. The server checks them once a minute (`server/src/features/schedules/scheduler.js`). A schedule whose previous run is still going is skipped for that minute, and minutes missed while the server was off aren't caught up. Scheduled runs are marked ⏰ in the run history, and the editor shows each schedule's next and last run.
+
 A run executes against a copy of the workflow taken when it started. Editing the workflow mid-run, or before a resume, doesn't change that run, and `ask_agent` checks permissions against the copy as well.
 
 Every `ask_agent` call also carries a stable `workItemId`. The first call claims that logical work item for one target node; later calls may continue the same work with that same node, but cannot hand it to a different node. Failover is unlocked only when the previous CLI attempt is machine-classified as `quota` or `provider_unavailable`. A genuinely distinct subtask must use a new `workItemId` and an explicit `parentWorkItemId` (`root` means it was split directly from the user's original request). The server also rejects identical normalized task text being relabelled and sent to another agent.
 
 ## The agent bridge
 
-`server/mcp-bridge.js` is a plain stdio MCP server exposing up to two tools, `ask_agent` and `spawn_agent` (below), and nothing in it is Claude-specific. Both CLIs run the exact same process; only the flags pointing at it differ, so `buildAgentBridgeContext` produces the environment and `buildClaudeBridgeArgs` / `buildCodexBridgeArgs` wrap it per provider. That means a Codex node can call a Claude node, a Claude node can call a Codex node, and either can call its own kind — all through the same node ids on the canvas, with the same per-node callee permissions and the same `MAX_CALL_DEPTH` guard.
+`server/src/features/bridge/mcp-bridge.js` is a plain stdio MCP server exposing up to two tools, `ask_agent` and `spawn_agent` (below), and nothing in it is Claude-specific. Both CLIs run the exact same process; only the flags pointing at it differ, so `buildAgentBridgeContext` produces the environment and `buildClaudeBridgeArgs` / `buildCodexBridgeArgs` wrap it per provider. That means a Codex node can call a Claude node, a Claude node can call a Codex node, and either can call its own kind — all through the same node ids on the canvas, with the same per-node callee permissions and the same `MAX_CALL_DEPTH` guard.
 
 Claude takes the whole server definition as one inline `--mcp-config` JSON blob. Codex has no such flag: it reads MCP servers from `[mcp_servers.<name>]` in `~/.codex/config.toml`, and `-c key=value` overrides any of it per invocation with the value parsed as TOML, so the bridge is passed as a handful of dotted overrides and nothing is written to your real config file.
 
@@ -166,7 +184,7 @@ There are three limits. `MAX_CALL_DEPTH` applies as usual. There's a cap on agen
 
 ### agy and the bridge
 
-agy has no per-run MCP option: servers only come from its global `~/.gemini/config/mcp_config.json`. So the first time an agy agent needs the bridge, the server registers it there once as `agent-bridge` (`node server/mcp-bridge.js`, with no environment of its own). It also adds one allow rule, `mcp(agent-bridge/*)`, to `~/.gemini/antigravity-cli/settings.json`, because headless agy auto-denies any MCP call that would need approval. Each run then passes its context (session, token, who it may call) through the agy process's environment, which agy hands on to the MCP servers it starts. In your own agy sessions the bridge has no context, so it registers no tools and does nothing. Both files are only touched when something is missing or points at an old path, and a settings file that isn't valid JSON is left alone.
+agy has no per-run MCP option: servers only come from its global `~/.gemini/config/mcp_config.json`. So the first time an agy agent needs the bridge, the server registers it there once as `agent-bridge` (`node server/src/features/bridge/mcp-bridge.js`, with no environment of its own). It also adds one allow rule, `mcp(agent-bridge/*)`, to `~/.gemini/antigravity-cli/settings.json`, because headless agy auto-denies any MCP call that would need approval. Each run then passes its context (session, token, who it may call) through the agy process's environment, which agy hands on to the MCP servers it starts. In your own agy sessions the bridge has no context, so it registers no tools and does nothing. Both files are only touched when something is missing or points at an old path, and a settings file that isn't valid JSON is left alone.
 
 One known limitation: agy caches each MCP tool's description under `~/.gemini/antigravity-cli/mcp/agent-bridge/`, shared by every agy process. Two agy coordinators starting at the same moment in different workflows may briefly see each other's member list in the tool description. Permissions are still checked by the server against the right run, so this can only confuse the model, not grant anything.
 
@@ -182,7 +200,7 @@ Changes waiting for Accept or Decline don't block the chat. The review branch is
 
 The chat box sits next to the run's diagram in a panel that stays in view while the task list scrolls. While the agent is working it shows a Stop button (the same as stopping the run). Each chat turn can be deleted, or the whole chat cleared, together with the hand-offs and spawned agents that turn caused. The agent forgets deleted turns too: Claude starts a new session for every turn (`--fork-session`), so the next turn resumes from the session before the deleted one; agy keeps one conversation for all turns, so after a delete it gets a transcript of what's left. Deleting a chat doesn't undo code changes.
 
-Nothing in the Run tab changes workflow config: diagrams there are read-only, and runs, resume and chat all work from the run's own snapshot of the workflow. `server/run-isolation.test.js` checks this.
+Nothing in the Run tab changes workflow config: diagrams there are read-only, and runs, resume and chat all work from the run's own snapshot of the workflow. `server/src/features/runs/run-isolation.test.js` checks this.
 
 ## Stopping and resuming
 
@@ -198,7 +216,7 @@ A run replays against the graph snapshot taken when it started (`workflowNodes`/
 
 The Run form has a "Target git branch" picker, filled from the local branches of the repo the working directory is in. Pick an existing branch, or tick "Create a new branch for this run" and name one; it's created from the picked branch when the run starts (names are checked with `git check-ref-format`, and `ao/*` is reserved for our scratch branches). The default is whatever is checked out.
 
-The run's review worktree forks from the target branch's tip, and Accept merges into that branch. If the branch is checked out somewhere (the repo itself or another worktree), the merge happens there so those files update, and that checkout must be clean. If it isn't checked out anywhere, the merge happens in a temporary worktree and your repo stays on whatever branch it's on, uncommitted changes included. Only a run that targets the checked-out branch still requires a clean repo to start. Chat turns and resumes land on the same branch. `server/workspace-branch.test.js` covers this against a real git repo.
+The run's review worktree forks from the target branch's tip, and Accept merges into that branch. If the branch is checked out somewhere (the repo itself or another worktree), the merge happens there so those files update, and that checkout must be clean. If it isn't checked out anywhere, the merge happens in a temporary worktree and your repo stays on whatever branch it's on, uncommitted changes included. Only a run that targets the checked-out branch still requires a clean repo to start. Chat turns and resumes land on the same branch. `server/src/features/workspace/workspace-branch.test.js` covers this against a real git repo.
 
 ## Workspace isolation
 

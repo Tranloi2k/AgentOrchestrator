@@ -35,19 +35,10 @@ jobs:
 
       - name: Check server syntax
         run: |
-          node --check server/index.js
-          node --check server/orchestrator.js
-          node --check server/mcp-bridge.js
-          node --check server/workspace.js
-          node --check server/security.js
-          node --check server/config.js
-          node --check server/registry.js
-          node --check server/run-store.js
-          node --check server/cli-runners.js
-          node --check server/executor.js
-          node --check server/spawn-policy.js
-          node --check server/workflow-model.js
-          node --check server/access.js
+          find server/src -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Server tests
+        run: npm test -w server
 
       - name: Smoke test API
         run: |

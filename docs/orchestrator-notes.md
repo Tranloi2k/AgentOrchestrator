@@ -1,3 +1,5 @@
+> **Lưu ý (cấu trúc mới):** `server/orchestrator.js` không còn tồn tại. Code server giờ chia theo tính năng trong `server/src/features/` — điều phối run nằm ở `runs/executor.js`, chạy CLI ở `runs/cli-runners.js`, lịch sử run ở `runs/run-store.js`, dữ liệu agent/workflow/skill/plugin ở `<tính năng>/<tính năng>.store.js`, và `src/index.js` chỉ khởi động server rồi đăng ký route của từng tính năng. Phần dưới đây mô tả thiết kế, các đường dẫn file trong đó là của cấu trúc cũ. Xem mục "Project layout" trong README.
+
 # Vai trò của `server/orchestrator.js`
 
 ## Tổng quan
