@@ -61,15 +61,34 @@ test("work lands on a branch that isn't checked out; the checked-out one is unto
   }
 });
 
-test("on the checked-out branch, Accept updates the working files; a dirty one is refused", async () => {
+test("on the checked-out branch, Accept updates the working files", async () => {
   const { parent, repo } = makeRepo();
   try {
     const review = await runOnto(repo, "r2", "main", "b.txt");
-    writeFileSync(path.join(repo, "README.md"), "local edit\n");
-    await assert.rejects(acceptWorkspaceReview(review), /chưa commit/);
-    git(repo, "checkout", "--", "README.md");
+    const head = git(repo, "rev-parse", "HEAD");
     await acceptWorkspaceReview(review);
     assert.equal(readFileSync(path.join(repo, "b.txt"), "utf8"), "agent\n");
+    assert.notEqual(git(repo, "rev-parse", "HEAD"), head, "a clean checkout gets the merge commit");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("edited while the run worked: Accept writes next to the user's edits, unless a file clashes", async () => {
+  const { parent, repo } = makeRepo();
+  try {
+    const review = await runOnto(repo, "r4", "main", "b.txt");
+    const head = git(repo, "rev-parse", "HEAD");
+    writeFileSync(path.join(repo, "README.md"), "local edit\n");
+    await acceptWorkspaceReview(review);
+    assert.equal(readFileSync(path.join(repo, "b.txt"), "utf8").replace(/\r\n/g, "\n"), "agent\n");
+    assert.equal(readFileSync(path.join(repo, "README.md"), "utf8"), "local edit\n", "the user's edit is kept");
+    assert.equal(git(repo, "rev-parse", "HEAD"), head, "nothing committed over the user's work in progress");
+
+    const clash = await runOnto(repo, "r5", "main", "c.txt");
+    writeFileSync(path.join(repo, "c.txt"), "user wrote it too\n");
+    await assert.rejects(acceptWorkspaceReview(clash), /c\.txt/);
+    assert.equal(readFileSync(path.join(repo, "c.txt"), "utf8"), "user wrote it too\n");
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }

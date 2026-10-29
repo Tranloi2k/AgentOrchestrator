@@ -303,7 +303,7 @@ export const translations = {
     "run.branch.current": "đang checkout",
     "run.branch.create": "Tạo nhánh mới cho run này",
     "run.branch.newPlaceholder": "vd: agent/login-page",
-    "run.branch.hint": "Agent làm việc trên bản sao tách từ nhánh này; bấm Accept thì code được gộp vào nhánh {branch}. Nhánh đang checkout không cần sạch nếu bạn chọn nhánh khác.",
+    "run.branch.hint": "Agent làm việc trên bản sao tách từ nhánh này; bấm Accept thì code được gộp vào nhánh {branch}. Nhánh đang checkout có thay đổi chưa commit cũng được: agent làm tiếp trên đó, và Accept ghi phần agent sửa vào thư mục của bạn, chưa commit.",
     "run.branch.notGit": "Thư mục này không phải git repo — agent ghi thẳng vào thư mục, không có review và không chọn nhánh được.",
     "run.review.into": "vào nhánh {branch}",
     "run.review.open": "Xem thay đổi",
@@ -429,7 +429,7 @@ export const translations = {
     "workflows.isolation.keepOnFailureHint":
       "Đường dẫn worktree và tên nhánh tạm được ghi trong log của bước đó để bạn tự vào xem/sửa. Tắt tuỳ chọn này thì hỏng là xoá luôn.",
     "workflows.isolation.caveat":
-      "Lưu ý: worktree chỉ chứa file git quản lý. Các mục cấp cao nhất bị .gitignore (node_modules, .env, build cache...) được liên kết dùng chung với repo gốc nên lệnh kiểm thử vẫn chạy được — nhưng chúng KHÔNG được cách ly, hai bước song song cùng chạy `npm install` vẫn giẫm chân nhau. Repo phải sạch (đã commit hoặc stash) thì run mới bắt đầu.",
+      "Lưu ý: worktree chỉ chứa file git quản lý. Các mục cấp cao nhất bị .gitignore (node_modules, .env, build cache...) được liên kết dùng chung với repo gốc nên lệnh kiểm thử vẫn chạy được — nhưng chúng KHÔNG được cách ly, hai bước song song cùng chạy `npm install` vẫn giẫm chân nhau. Repo không cần sạch: thay đổi chưa commit được chụp lại để agent làm tiếp trên đó.",
     "plugins.title": "Plugins (Claude Code thật)",
     "plugins.banner": "Nạp plugin Claude Code thật (vd. github.com/DietrichGebert/ponytail) — hệ thống tự `git clone` rồi truyền qua cờ --plugin-dir khi chạy agent. Gắn plugin cho agent ở tab Agents.",
     "plugins.create": "+ Cài plugin mới",
@@ -776,7 +776,7 @@ export const translations = {
     "run.branch.current": "checked out",
     "run.branch.create": "Create a new branch for this run",
     "run.branch.newPlaceholder": "e.g. agent/login-page",
-    "run.branch.hint": "The agent works on a copy forked from this branch; Accept merges the code into {branch}. The checked-out branch doesn't need to be clean if you pick another one.",
+    "run.branch.hint": "The agent works on a copy forked from this branch; Accept merges the code into {branch}. The checked-out branch may have uncommitted changes: the agents build on them, and Accept writes their changes into your folder, uncommitted.",
     "run.branch.notGit": "This folder isn't a git repo — the agent writes straight into it, with no review and no branch to pick.",
     "run.review.into": "into {branch}",
     "run.review.open": "View changes",
@@ -902,7 +902,7 @@ export const translations = {
     "workflows.isolation.keepOnFailureHint":
       "The worktree path and temp branch name are written to that step's log so you can go look at it yourself. Turn this off to delete failures immediately.",
     "workflows.isolation.caveat":
-      "Note: a worktree only contains git-tracked files. Top-level .gitignore'd entries (node_modules, .env, build caches...) are linked through to the base repo so your test command still runs — but they are NOT isolated, so two parallel steps both running `npm install` still collide. The repo must be clean (committed or stashed) before a run will start.",
+      "Note: a worktree only contains git-tracked files. Top-level .gitignore'd entries (node_modules, .env, build caches...) are linked through to the base repo so your test command still runs — but they are NOT isolated, so two parallel steps both running `npm install` still collide. The repo doesn't need to be clean: uncommitted changes are captured so the agents build on them.",
     "plugins.title": "Plugins (real Claude Code)",
     "plugins.banner": "Install real Claude Code plugins (e.g. github.com/DietrichGebert/ponytail) — the system `git clone`s the repo and passes it via --plugin-dir when running an agent. Attach plugins to an agent in the Agents tab.",
     "plugins.create": "+ Install plugin",

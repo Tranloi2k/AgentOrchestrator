@@ -443,3 +443,9 @@ Các endpoint HTTP/WebSocket gọi hàm export:
 ---
 
 **Tóm lại:** Orchestrator là **orchestration layer** tách biệt khỏi HTTP, quản lý agent/workflow config, chạy agents qua Claude CLI, stream log realtime qua event bus, và cung cấp API clean cho REST/WebSocket layer.
+
+### 📸 Chạy trên repo có thay đổi chưa commit
+- `openWorkspaceSession` không còn từ chối repo bẩn. Khi nhánh đích là nhánh đang checkout và có thay đổi chưa commit, `snapshotWorkingTree` chụp chúng thành một commit (index tạm, `git add -A`, `write-tree`, `commit-tree`), giữ ở `refs/ao/snapshot/<run>`; thư mục, index và HEAD của người dùng không bị đụng tới.
+- Worktree review tách từ snapshot đó và `baseCommit` = snapshot, nên diff review chỉ có phần agent sửa. Resume và chat tiếp đọc lại ref này.
+- Accept (`acceptIntoWorkingTree`): kiểm tra từng file agent sửa vẫn giống hệt bản snapshot (`hash-object --path`), rồi ghi bằng `git restore --worktree`; không commit, không đổi HEAD. Có file bị người dùng sửa sau khi run bắt đầu thì từ chối và không ghi gì. Run bắt đầu trên repo sạch nhưng lúc Accept thư mục đã bẩn cũng đi đường này (so với `baseCommit`).
+- Ref snapshot bị xoá cùng worktree review (`cleanupReviewWorkspace`).

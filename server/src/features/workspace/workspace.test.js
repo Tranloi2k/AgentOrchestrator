@@ -115,24 +115,90 @@ test("node worktree integrates into review branch, not base", async (t) => {
   await declineWorkspaceReview(review);
 });
 
-test("dirty repositories are rejected before an agent can modify them", async (t) => {
+/** A repo with uncommitted work: a modified tracked file, a staged new file, an untracked one. */
+function makeDirtyRepo() {
   const repo = makeRepo();
-  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  writeFileSync(path.join(repo, "sample.txt"), "user edit\n", "utf8");
+  writeFileSync(path.join(repo, "staged.txt"), "staged by user\n", "utf8");
+  git(repo, "add", "staged.txt");
   writeFileSync(path.join(repo, "unfinished.txt"), "user work\n", "utf8");
+  return repo;
+}
+// Checkouts may turn LF into CRLF (core.autocrlf on Windows).
+const read = (file) => readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+
+test("a run on uncommitted changes builds on them without touching the user's checkout", async (t) => {
+  const repo = makeDirtyRepo();
+  const runId = "dirty-test";
+  t.after(() => rmSync(path.join(path.dirname(repo), ".ao-worktrees", runId), { recursive: true, force: true }));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  const statusBefore = git(repo, "status", "--porcelain");
+  const headBefore = git(repo, "rev-parse", "HEAD");
   const messages = [];
 
-  const { session, fatal, reason } = await openWorkspaceSession({
-    cwd: repo,
-    runId: "dirty-test",
-    isolation: {},
-    log: (message) => messages.push(message),
-  });
+  const { session, fatal } = await openWorkspaceSession({ cwd: repo, runId, isolation: {}, log: (m) => messages.push(m) });
+  assert.ok(session, "the run starts");
+  assert.equal(fatal, false);
+  assert.match(messages.join("\n"), /chụp lại/);
+  // The agents see the user's work in progress.
+  assert.equal(read(path.join(session.reviewDir, "sample.txt")), "user edit\n");
+  assert.equal(read(path.join(session.reviewDir, "staged.txt")), "staged by user\n");
+  assert.equal(read(path.join(session.reviewDir, "unfinished.txt")), "user work\n");
+  // ...and the user's checkout, index included, is exactly as it was.
+  assert.equal(git(repo, "status", "--porcelain"), statusBefore);
+  assert.equal(git(repo, "rev-parse", "HEAD"), headBefore);
 
-  assert.equal(session, null);
-  // Fatal: the caller must stop rather than edit files it can neither isolate nor roll back.
-  assert.equal(fatal, true);
-  assert.match(reason, /commit hoặc stash/);
-  assert.match(messages.join("\n"), /commit hoặc stash/);
+  // An agent edits the user's untracked file, adds one, and deletes the staged one.
+  writeFileSync(path.join(session.reviewDir, "unfinished.txt"), "user work\nfinished by agent\n", "utf8");
+  writeFileSync(path.join(session.reviewDir, "from-agent.txt"), "new\n", "utf8");
+  rmSync(path.join(session.reviewDir, "staged.txt"));
+  const review = await finalizeWorkspaceReview(session, () => {});
+  assert.deepEqual(review.files.map((f) => f.path).sort(), ["from-agent.txt", "staged.txt", "unfinished.txt"], "only the agent's changes are in the review");
+
+  await acceptWorkspaceReview(review);
+  assert.equal(git(repo, "rev-parse", "HEAD"), headBefore, "nothing was committed for the user");
+  assert.equal(read(path.join(repo, "sample.txt")), "user edit\n", "the user's own edit is still there");
+  assert.equal(read(path.join(repo, "unfinished.txt")), "user work\nfinished by agent\n");
+  assert.equal(read(path.join(repo, "from-agent.txt")), "new\n");
+  assert.ok(!existsSync(path.join(repo, "staged.txt")));
+  assert.equal(git(repo, "for-each-ref", "refs/ao/"), "", "the snapshot ref is gone");
+});
+
+test("Accept refuses, writing nothing, when the user changed a file the agent also changed", async (t) => {
+  const repo = makeDirtyRepo();
+  const runId = "dirty-conflict";
+  t.after(() => rmSync(path.join(path.dirname(repo), ".ao-worktrees", runId), { recursive: true, force: true }));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  const { session } = await openWorkspaceSession({ cwd: repo, runId, isolation: {}, log: () => {} });
+  writeFileSync(path.join(session.reviewDir, "unfinished.txt"), "agent version\n", "utf8");
+  writeFileSync(path.join(session.reviewDir, "other.txt"), "agent file\n", "utf8");
+  const review = await finalizeWorkspaceReview(session, () => {});
+
+  writeFileSync(path.join(repo, "unfinished.txt"), "user kept editing\n", "utf8");
+  await assert.rejects(() => acceptWorkspaceReview(review), /unfinished\.txt/);
+  assert.equal(read(path.join(repo, "unfinished.txt")), "user kept editing\n");
+  assert.ok(!existsSync(path.join(repo, "other.txt")), "not even the files without a clash were written");
+
+  await declineWorkspaceReview(review);
+  assert.equal(read(path.join(repo, "unfinished.txt")), "user kept editing\n");
+  assert.equal(git(repo, "for-each-ref", "refs/ao/"), "");
+});
+
+test("a resumed run on uncommitted changes keeps diffing against its snapshot", async (t) => {
+  const repo = makeDirtyRepo();
+  const runId = "dirty-resume";
+  t.after(() => rmSync(path.join(path.dirname(repo), ".ao-worktrees", runId), { recursive: true, force: true }));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  const first = await openWorkspaceSession({ cwd: repo, runId, isolation: {}, log: () => {} });
+  writeFileSync(path.join(first.session.reviewDir, "from-agent.txt"), "new\n", "utf8");
+  git(first.session.reviewDir, "add", "-A");
+  git(first.session.reviewDir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "agent");
+
+  const second = await openWorkspaceSession({ cwd: repo, runId, isolation: {}, log: () => {} });
+  assert.equal(second.session.baseCommit, first.session.baseCommit);
+  const review = await finalizeWorkspaceReview(second.session, () => {});
+  assert.deepEqual(review.files.map((f) => f.path), ["from-agent.txt"]);
+  await declineWorkspaceReview(review);
 });
 
 test("a non-git directory degrades to a plain run instead of failing it", async (t) => {

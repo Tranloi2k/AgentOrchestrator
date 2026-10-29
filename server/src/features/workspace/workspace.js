@@ -17,7 +17,8 @@
  * — this module deliberately knows nothing about runs/tasks/events.
  */
 
-import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn as nodeSpawn } from "node:child_process";
 import crossSpawn from "cross-spawn";
@@ -42,10 +43,10 @@ const DEFAULT_TEST_TIMEOUT_MS = 15 * 60_000;
  * would be reported as "command not found" instead of showing its real output. Node's own
  * spawn has no such heuristic. cross-spawn is still the right call for `git`, where its
  * PATHEXT/argv-quoting fixes are what we actually want. */
-function runCommand(cmd, args, { cwd, shell = false, timeout = GIT_TIMEOUT_MS } = {}) {
+function runCommand(cmd, args, { cwd, shell = false, timeout = GIT_TIMEOUT_MS, env = null } = {}) {
   return new Promise((resolve) => {
     const spawnFn = shell ? nodeSpawn : crossSpawn;
-    const child = spawnFn(cmd, args, { cwd, shell, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnFn(cmd, args, { cwd, shell, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env: { ...process.env, ...env } } : {}) });
     let out = "";
     const append = (chunk) => {
       out += chunk.toString();
@@ -137,6 +138,53 @@ async function resolveRepo(cwd) {
 async function isDirty(repoRoot) {
   const res = await git(["status", "--porcelain"], repoRoot);
   return res.ok && res.output.length > 0;
+}
+
+/** Where a run keeps the snapshot of the uncommitted changes it started from (see below). */
+const snapshotRefOf = (runId) => `refs/ao/snapshot/${runId}`;
+
+/**
+ * Records the repo's uncommitted changes (modified, staged and untracked files; ignored ones
+ * stay out) as a commit on top of HEAD, without touching the user's working tree, index or
+ * branch: the files are added to a temporary copy of the index, written as a tree, and committed
+ * with `commit-tree`. A ref keeps the commit alive and lets a resumed run find it again.
+ * Returns the commit, or null with the reason logged.
+ */
+async function snapshotWorkingTree(repoRoot, runId, log) {
+  const gitPath = await git(["rev-parse", "--git-path", "index"], repoRoot);
+  const indexPath = gitPath.ok ? path.resolve(repoRoot, gitPath.output.trim()) : "";
+  const tempIndex = path.join(tmpdir(), `ao-snapshot-${runId}-${process.pid}.index`);
+  const env = { GIT_INDEX_FILE: tempIndex };
+  const run = (args) => runCommand("git", args, { cwd: repoRoot, env });
+  try {
+    // Starting from a copy of the real index keeps git's stat cache, so only changed files are hashed.
+    if (indexPath && existsSync(indexPath)) copyFileSync(indexPath, tempIndex);
+    else if (!(await run(["read-tree", "HEAD"])).ok) throw new Error("git read-tree thất bại");
+    const added = await run(["add", "-A"]);
+    if (!added.ok) throw new Error(added.output || "git add thất bại");
+    const tree = await run(["write-tree"]);
+    if (!tree.ok) throw new Error(tree.output || "git write-tree thất bại");
+    const commit = await git(
+      ["-c", "user.name=Agents Orchestrator", "-c", "user.email=orchestrator@local", "commit-tree", tree.output.trim(), "-p", "HEAD", "-m", `orchestrator: thay đổi chưa commit lúc run ${runId} bắt đầu`],
+      repoRoot
+    );
+    if (!commit.ok) throw new Error(commit.output || "git commit-tree thất bại");
+    const sha = commit.output.trim();
+    const ref = await git(["update-ref", snapshotRefOf(runId), sha], repoRoot);
+    if (!ref.ok) throw new Error(ref.output || "git update-ref thất bại");
+    return sha;
+  } catch (err) {
+    log(`❌ Không chụp được các thay đổi chưa commit: ${err.message}`);
+    return null;
+  } finally {
+    rmSync(tempIndex, { force: true });
+  }
+}
+
+/** The snapshot commit a run started from, or null when it started from a clean repo. */
+async function readSnapshot(repoRoot, runId) {
+  const res = await git(["rev-parse", "--verify", "--quiet", `${snapshotRefOf(runId)}^{commit}`], repoRoot);
+  return res.ok && res.output.trim() ? res.output.trim() : null;
 }
 
 /** Our own scratch branches (review / per-node) — never offered as a target. */
@@ -267,13 +315,10 @@ async function openWorkspaceSession({ cwd, runId, isolation, targetBranch = null
     log(`❌ ${reason}`);
     return { session: null, fatal: true, reason };
   }
-  // Uncommitted changes only get in the way when the work lands on the checked-out branch: that's
-  // where Accept merges into the working files. Another branch is merged off to the side.
-  if (baseBranch === repo.branch && (await isDirty(repo.root))) {
-    const reason = `Repo "${repo.root}" đang có thay đổi chưa commit. Hãy commit hoặc stash trước khi chạy, để hệ thống tách được chính xác thay đổi của agent và Decline an toàn.`;
-    log(`❌ ${reason}`);
-    return { session: null, fatal: true, reason };
-  }
+  // Uncommitted changes only matter when the work lands on the checked-out branch: the agents
+  // should build on them, and Accept writes into those same files. Another branch is merged off
+  // to the side, so there they're simply not involved.
+  const dirty = baseBranch === repo.branch && (await isDirty(repo.root));
   const rootDir = path.join(path.dirname(repo.root), WORKTREE_DIRNAME, runId);
   const reviewDir = path.join(rootDir, "review");
   const reviewBranch = `ao/review-${runId}`;
@@ -301,10 +346,16 @@ async function openWorkspaceSession({ cwd, runId, isolation, targetBranch = null
     await git(["rev-parse", "--verify", "--quiet", `refs/heads/${reviewBranch}`], repo.root)
   ).ok;
   let baseCommit = headCommit;
+  let snapshotCommit = null;
 
   if (reviewBranchExists) {
-    const forkPoint = await git(["merge-base", `refs/heads/${baseBranch}`, reviewBranch], repo.root);
-    if (forkPoint.ok && forkPoint.output.trim()) baseCommit = forkPoint.output.trim();
+    // A run that started on uncommitted changes keeps diffing against that snapshot, so the
+    // user's own changes never show up as the agents' work.
+    snapshotCommit = await readSnapshot(repo.root, runId);
+    const forkPoint = snapshotCommit ? null : await git(["merge-base", `refs/heads/${baseBranch}`, reviewBranch], repo.root);
+    if (snapshotCommit) baseCommit = snapshotCommit;
+    else if (forkPoint.ok && forkPoint.output.trim()) baseCommit = forkPoint.output.trim();
+    if (dirty) log("ℹ️ Run này tiếp tục trên bản review đã có; thay đổi chưa commit nào bạn làm sau khi run bắt đầu không được đưa vào.");
 
     // In a worktree `.git` is a file pointing back at the real repo; its absence means the
     // directory was deleted or never finished being created, while the branch survived.
@@ -331,7 +382,22 @@ async function openWorkspaceSession({ cwd, runId, isolation, targetBranch = null
         /* git reports a useful error below */
       }
     }
-    const created = await git(["worktree", "add", "-b", reviewBranch, reviewDir, headCommit], repo.root);
+    // A leftover snapshot from an earlier review of this run (declined, or with no changes).
+    await git(["update-ref", "-d", snapshotRefOf(runId)], repo.root);
+    if (dirty) {
+      snapshotCommit = await snapshotWorkingTree(repo.root, runId, log);
+      if (!snapshotCommit) {
+        const reason = `Repo "${repo.root}" có thay đổi chưa commit nhưng không chụp lại được để agent làm tiếp. Hãy commit hoặc stash rồi chạy lại.`;
+        log(`❌ ${reason}`);
+        return { session: null, fatal: true, reason };
+      }
+      baseCommit = snapshotCommit;
+      log(
+        `📸 Nhánh ${baseBranch} có thay đổi chưa commit: đã chụp lại để agent làm tiếp trên đó. Thư mục và index của bạn không bị đụng tới; ` +
+          "bản review chỉ gồm phần agent sửa, và Accept ghi phần đó vào thư mục của bạn (chưa commit, cạnh thay đổi của bạn)."
+      );
+    }
+    const created = await git(["worktree", "add", "-b", reviewBranch, reviewDir, baseCommit], repo.root);
     if (!created.ok) {
       const reason = `Không tạo được workspace review: ${created.output || "git worktree add thất bại"}`;
       log(`❌ ${reason}`);
@@ -353,6 +419,9 @@ async function openWorkspaceSession({ cwd, runId, isolation, targetBranch = null
       keepOnFailure: isolation?.keepOnFailure !== false,
       // repoRoot's parent — see WORKTREE_DIRNAME.
       rootDir,
+      // Set when the run started on uncommitted changes (see snapshotWorkingTree).
+      snapshotCommit,
+      snapshotRef: snapshotCommit ? snapshotRefOf(runId) : null,
     },
     fatal: false,
     reason: "",
@@ -706,6 +775,9 @@ async function finalizeWorkspaceReview(session, log) {
     dir: session.reviewDir,
     files,
     patchTruncated: !!patch.truncated,
+    // The run started on uncommitted changes: Accept writes into the working folder instead of merging.
+    snapshotCommit: session.snapshotCommit || null,
+    snapshotRef: session.snapshotRef || null,
     createdAt: Date.now(),
   };
 }
@@ -717,6 +789,52 @@ async function cleanupReviewWorkspace(reviewOrSession) {
   if (dir) await git(["worktree", "remove", "--force", dir], repoRoot);
   await git(["worktree", "prune"], repoRoot);
   if (branch) await git(["branch", "-D", branch], repoRoot);
+  if (reviewOrSession.snapshotRef) await git(["update-ref", "-d", reviewOrSession.snapshotRef], repoRoot);
+}
+
+/**
+ * Accept for a run that started on uncommitted changes. The agents' changes (snapshot to review
+ * head) are written into the folder where the target branch is checked out, as uncommitted
+ * changes next to the user's own; nothing is committed and HEAD doesn't move.
+ *
+ * Only safe if every file the agents changed is still exactly as it was in the snapshot: a file
+ * the user edited again since would otherwise lose those edits. Any such file stops the whole
+ * Accept before anything is written, and says which files they are. Contents are compared the way
+ * git sees them (`hash-object --path` applies the same line-ending filters), and files are written
+ * with `git restore --worktree`, which applies them back, so CRLF checkouts work.
+ */
+async function acceptIntoWorkingTree(review) {
+  const dir = await checkedOutAt(review.repoRoot, review.baseBranch);
+  if (!dir) {
+    throw new Error(`Nhánh ${review.baseBranch} không còn được checkout ở đâu. Checkout lại nhánh đó rồi Accept: thay đổi của agent được ghi vào thư mục đang làm của bạn.`);
+  }
+  const changed = await gitData(["diff", "--name-status", "--no-renames", "-z", review.snapshotCommit, review.reviewHead], review.repoRoot);
+  if (!changed.ok) throw new Error(changed.output || "Không đọc được danh sách file agent đã sửa.");
+  const parts = changed.output.split("\0").filter(Boolean);
+  const entries = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) entries.push({ status: parts[i][0], file: parts[i + 1] });
+
+  const touched = [];
+  for (const { file } of entries) {
+    const before = await git(["rev-parse", "--verify", "--quiet", `${review.snapshotCommit}:${file}`], review.repoRoot);
+    const full = path.join(dir, file);
+    const now = existsSync(full) ? await git(["hash-object", `--path=${file}`, full], dir) : null;
+    const same = before.ok ? !!now?.ok && now.output.trim() === before.output.trim() : !now;
+    if (!same) touched.push(file);
+  }
+  if (touched.length) {
+    throw new Error(
+      `Bạn đã sửa file mà agent cũng sửa, sau khi run bắt đầu: ${touched.join(", ")}. Chưa ghi gì cả. ` +
+        `Hãy hoàn tác các chỗ đó rồi Accept lại, hoặc Decline; bạn có thể xem phần agent sửa bằng \`git diff ${review.snapshotCommit.slice(0, 12)} ${review.branch}\`.`
+    );
+  }
+
+  const written = entries.filter((e) => e.status !== "D").map((e) => e.file);
+  for (let i = 0; i < written.length; i += 100) {
+    const res = await git(["restore", `--source=${review.reviewHead}`, "--worktree", "--", ...written.slice(i, i + 100)], dir);
+    if (!res.ok) throw new Error(`Không ghi được thay đổi của agent vào ${dir}: ${res.output}`);
+  }
+  for (const e of entries.filter((x) => x.status === "D")) rmSync(path.join(dir, e.file), { force: true });
 }
 
 async function acceptWorkspaceReview(review) {
@@ -727,14 +845,24 @@ async function acceptWorkspaceReview(review) {
   if (!(await branchExists(review.repoRoot, review.baseBranch))) {
     throw new Error(`Nhánh đích "${review.baseBranch}" không còn tồn tại.`);
   }
+  if (review.snapshotCommit) {
+    await acceptIntoWorkingTree(review);
+    await cleanupReviewWorkspace(review);
+    return;
+  }
 
   // Merge where the target branch is checked out (the repo itself or another worktree) so those
   // files update; if it isn't checked out anywhere, in a temporary worktree next to the review.
   let mergeDir = await checkedOutAt(review.repoRoot, review.baseBranch);
   let temporary = false;
   if (mergeDir) {
+    // The user has been editing while the run worked: a merge would trip over their uncommitted
+    // changes, so the agents' changes are written next to them instead, as for a run that started
+    // on uncommitted changes (and refused, writing nothing, if a file clashes).
     if (await isDirty(mergeDir)) {
-      throw new Error(`Nhánh ${review.baseBranch} đang được checkout ở "${mergeDir}" và có thay đổi chưa commit. Commit hoặc stash rồi Accept lại.`);
+      await acceptIntoWorkingTree({ ...review, snapshotCommit: review.baseCommit });
+      await cleanupReviewWorkspace(review);
+      return;
     }
   } else {
     mergeDir = path.join(path.dirname(review.dir), "land");
