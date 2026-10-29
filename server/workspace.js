@@ -75,6 +75,52 @@ function runCommand(cmd, args, { cwd, shell = false, timeout = GIT_TIMEOUT_MS } 
 
 const git = (args, cwd, timeout) => runCommand("git", args, { cwd, timeout });
 
+const DIFF_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Git output that is data, not a log: stdout only (stderr warnings such as "LF will be replaced
+ * by CRLF" must not end up inside a patch), kept from the start, and with paths unquoted so
+ * names with spaces or Vietnamese characters match across --name-status, --numstat and the patch.
+ */
+function gitData(args, cwd) {
+  return new Promise((resolve) => {
+    const child = crossSpawn("git", ["-c", "core.quotePath=false", ...args], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = [];
+    let size = 0;
+    let err = "";
+    child.stdout.on("data", (c) => {
+      if (size < DIFF_MAX_BYTES) chunks.push(c);
+      size += c.length;
+    });
+    child.stderr.on("data", (c) => (err += c));
+    const timer = setTimeout(() => child.kill("SIGKILL"), GIT_TIMEOUT_MS);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ ok: false, output: e.message });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const output = Buffer.concat(chunks).toString("utf8");
+      resolve({ ok: code === 0, output: code === 0 ? output : err.trim() || output, truncated: size > DIFF_MAX_BYTES });
+    });
+  });
+}
+
+/**
+ * Splits a whole-range patch into one section per file. git writes the sections in the same order
+ * as --name-status lists the files (same range, same options), so they're matched by position;
+ * a section is only trusted if its header names the file, otherwise it's looked up by name.
+ */
+function splitPatchByFile(patch, files) {
+  const sections = patch.split(/(?=^diff --git )/m).filter((s) => s.startsWith("diff --git "));
+  const names = (file) => [file.path, file.previousPath].filter(Boolean);
+  const mentions = (section, file) => {
+    const header = section.split("\n", 1)[0];
+    return names(file).some((p) => header.includes(` b/${p}`) || header.includes(` a/${p}`));
+  };
+  return files.map((file, i) => (sections[i] && mentions(sections[i], file) ? sections[i] : sections.find((s) => mentions(s, file)) || ""));
+}
+
 /** Resolves `cwd` to the root of the git repo containing it, or null if it isn't in one. */
 async function resolveRepo(cwd) {
   const top = await git(["rev-parse", "--show-toplevel"], cwd);
@@ -91,6 +137,51 @@ async function resolveRepo(cwd) {
 async function isDirty(repoRoot) {
   const res = await git(["status", "--porcelain"], repoRoot);
   return res.ok && res.output.length > 0;
+}
+
+/** Our own scratch branches (review / per-node) — never offered as a target. */
+const isInternalBranch = (name) => name.startsWith("ao/");
+
+/**
+ * Local branches of the repo containing `cwd`, for the "target branch" picker. null when
+ * `cwd` isn't in a git repo (the run then writes straight into the folder, no review).
+ */
+async function listBranches(cwd) {
+  const repo = await resolveRepo(cwd);
+  if (!repo) return null;
+  const res = await git(["for-each-ref", "--format=%(refname:short)", "refs/heads"], repo.root);
+  const branches = res.ok
+    ? res.output.split("\n").map((b) => b.trim()).filter((b) => b && !isInternalBranch(b))
+    : [];
+  return { repoRoot: repo.root, current: repo.branch, branches };
+}
+
+async function branchExists(repoRoot, branch) {
+  return (await git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], repoRoot)).ok;
+}
+
+/**
+ * Settles which branch a run's work lands on, before the run starts: an existing branch, or a
+ * new one created right now from `from`. Throws with a readable message on a bad name, a missing
+ * branch or a name that's taken. Returns the branch name, or null when `cwd` isn't a git repo.
+ */
+async function prepareTargetBranch(cwd, { branch, newBranch }) {
+  const repo = await resolveRepo(cwd);
+  if (!repo) {
+    if (branch || newBranch) throw new Error(`"${cwd}" không phải git repository nên không chọn nhánh được.`);
+    return null;
+  }
+  const from = String(branch || repo.branch).trim();
+  if (isInternalBranch(from) || !(await branchExists(repo.root, from))) throw new Error(`Không tìm thấy nhánh "${from}".`);
+  const name = String(newBranch || "").trim();
+  if (!name) return from;
+
+  const valid = await git(["check-ref-format", "--branch", name], repo.root);
+  if (!valid.ok || isInternalBranch(name)) throw new Error(`Tên nhánh "${name}" không hợp lệ.`);
+  if (await branchExists(repo.root, name)) throw new Error(`Nhánh "${name}" đã tồn tại — chọn nó trong danh sách thay vì tạo mới.`);
+  const created = await git(["branch", name, from], repo.root);
+  if (!created.ok) throw new Error(`Không tạo được nhánh "${name}": ${created.output}`);
+  return name;
 }
 
 /**
@@ -162,14 +253,23 @@ async function linkIgnoredArtifacts(repoRoot, targetDir, log) {
  * `reason` is the message shown to the user, so each failure explains its own specific cause
  * rather than the caller inventing a generic one.
  */
-async function openWorkspaceSession({ cwd, runId, isolation, log }) {
+async function openWorkspaceSession({ cwd, runId, isolation, targetBranch = null, log }) {
   const repo = await resolveRepo(cwd);
   if (!repo) {
     const reason = `"${cwd}" không nằm trong một git repository (hoặc không tìm thấy lệnh git), nên không tạo được bản review. Agent sẽ ghi thẳng vào thư mục làm việc như trước.`;
     log(`⚠️ ${reason}`);
     return { session: null, fatal: false, reason };
   }
-  if (await isDirty(repo.root)) {
+  // The branch the work lands on: the one picked for the run, else whatever is checked out.
+  const baseBranch = targetBranch || repo.branch;
+  if (targetBranch && !(await branchExists(repo.root, targetBranch))) {
+    const reason = `Nhánh đích "${targetBranch}" không còn tồn tại trong repo.`;
+    log(`❌ ${reason}`);
+    return { session: null, fatal: true, reason };
+  }
+  // Uncommitted changes only get in the way when the work lands on the checked-out branch: that's
+  // where Accept merges into the working files. Another branch is merged off to the side.
+  if (baseBranch === repo.branch && (await isDirty(repo.root))) {
     const reason = `Repo "${repo.root}" đang có thay đổi chưa commit. Hãy commit hoặc stash trước khi chạy, để hệ thống tách được chính xác thay đổi của agent và Decline an toàn.`;
     log(`❌ ${reason}`);
     return { session: null, fatal: true, reason };
@@ -177,9 +277,9 @@ async function openWorkspaceSession({ cwd, runId, isolation, log }) {
   const rootDir = path.join(path.dirname(repo.root), WORKTREE_DIRNAME, runId);
   const reviewDir = path.join(rootDir, "review");
   const reviewBranch = `ao/review-${runId}`;
-  const headResult = await git(["rev-parse", "HEAD"], repo.root);
+  const headResult = await git(["rev-parse", `refs/heads/${baseBranch}^{commit}`], repo.root);
   if (!headResult.ok) {
-    const reason = `Không đọc được HEAD của repo "${repo.root}": ${headResult.output || "lỗi git"}`;
+    const reason = `Không đọc được nhánh ${baseBranch} của repo "${repo.root}": ${headResult.output || "lỗi git"}`;
     log(`❌ ${reason}`);
     return { session: null, fatal: true, reason };
   }
@@ -197,13 +297,13 @@ async function openWorkspaceSession({ cwd, runId, isolation, log }) {
   // after a crash). Its commits ARE the work the checkpoint records as done — recreating the
   // branch from HEAD would keep those nodes marked done while silently throwing away every file
   // they wrote. So reuse it, and take the base commit from where it forked rather than from HEAD.
-  const branchExists = (
+  const reviewBranchExists = (
     await git(["rev-parse", "--verify", "--quiet", `refs/heads/${reviewBranch}`], repo.root)
   ).ok;
   let baseCommit = headCommit;
 
-  if (branchExists) {
-    const forkPoint = await git(["merge-base", "HEAD", reviewBranch], repo.root);
+  if (reviewBranchExists) {
+    const forkPoint = await git(["merge-base", `refs/heads/${baseBranch}`, reviewBranch], repo.root);
     if (forkPoint.ok && forkPoint.output.trim()) baseCommit = forkPoint.output.trim();
 
     // In a worktree `.git` is a file pointing back at the real repo; its absence means the
@@ -244,7 +344,7 @@ async function openWorkspaceSession({ cwd, runId, isolation, log }) {
   return {
     session: {
       repoRoot: repo.root,
-      baseBranch: repo.branch,
+      baseBranch,
       baseCommit,
       reviewBranch,
       reviewDir,
@@ -457,9 +557,9 @@ async function finalizeWorkspaceReview(session, log) {
 
   const range = `${session.baseCommit}...${session.reviewBranch}`;
   const [nameStatus, numstat, patch] = await Promise.all([
-    git(["diff", "--name-status", "--find-renames", range], session.reviewDir),
-    git(["diff", "--numstat", "--find-renames", range], session.reviewDir),
-    git(["diff", "--no-color", "--find-renames", range], session.reviewDir),
+    gitData(["diff", "--name-status", "--find-renames", range], session.reviewDir),
+    gitData(["diff", "--numstat", "--find-renames", range], session.reviewDir),
+    gitData(["diff", "--no-color", "--find-renames", range], session.reviewDir),
   ]);
   if (!nameStatus.ok || !numstat.ok || !patch.ok) {
     throw new Error(nameStatus.output || numstat.output || patch.output || "Không đọc được diff");
@@ -471,7 +571,14 @@ async function finalizeWorkspaceReview(session, log) {
     return { status: "no_changes", files: [], patch: "", patchTruncated: false };
   }
 
-  const maxPatchLength = 1_500_000;
+  // Each file carries its own section of the patch, capped per file so one huge file (a lock
+  // file, a build output) can't push every other file's diff out.
+  const perFileMax = 400_000;
+  const sections = splitPatchByFile(patch.output, files);
+  files.forEach((file, i) => {
+    file.patch = sections[i].slice(0, perFileMax);
+    file.patchTruncated = sections[i].length > perFileMax || (patch.truncated && !sections[i]);
+  });
   const reviewHead = await git(["rev-parse", session.reviewBranch], session.repoRoot);
   if (!reviewHead.ok) throw new Error(reviewHead.output || "Không đọc được review commit");
   return {
@@ -483,8 +590,7 @@ async function finalizeWorkspaceReview(session, log) {
     reviewHead: reviewHead.output.trim(),
     dir: session.reviewDir,
     files,
-    patch: patch.output.slice(0, maxPatchLength),
-    patchTruncated: patch.output.length > maxPatchLength,
+    patchTruncated: !!patch.truncated,
     createdAt: Date.now(),
   };
 }
@@ -503,19 +609,50 @@ async function acceptWorkspaceReview(review) {
   if (!currentReviewHead.ok || currentReviewHead.output.trim() !== review.reviewHead) {
     throw new Error("Nhánh review đã thay đổi sau khi tạo diff. Hãy review lại trước khi Accept.");
   }
-  const currentBranch = await git(["rev-parse", "--abbrev-ref", "HEAD"], review.repoRoot);
-  if (!currentBranch.ok || currentBranch.output.trim() !== review.baseBranch) {
-    throw new Error(`Repo phải đang ở nhánh ${review.baseBranch} để Accept.`);
+  if (!(await branchExists(review.repoRoot, review.baseBranch))) {
+    throw new Error(`Nhánh đích "${review.baseBranch}" không còn tồn tại.`);
   }
-  const merged = await git(
-    ["merge", "--no-ff", "--no-edit", "-m", `orchestrator: accept ${review.branch}`, review.branch],
-    review.repoRoot
-  );
-  if (!merged.ok) {
-    await git(["merge", "--abort"], review.repoRoot);
-    throw new Error(`Không thể apply thay đổi: ${merged.output || "git merge thất bại"}`);
+
+  // Merge where the target branch is checked out (the repo itself or another worktree) so those
+  // files update; if it isn't checked out anywhere, in a temporary worktree next to the review.
+  let mergeDir = await checkedOutAt(review.repoRoot, review.baseBranch);
+  let temporary = false;
+  if (mergeDir) {
+    if (await isDirty(mergeDir)) {
+      throw new Error(`Nhánh ${review.baseBranch} đang được checkout ở "${mergeDir}" và có thay đổi chưa commit. Commit hoặc stash rồi Accept lại.`);
+    }
+  } else {
+    mergeDir = path.join(path.dirname(review.dir), "land");
+    rmSync(mergeDir, { recursive: true, force: true });
+    const added = await git(["worktree", "add", mergeDir, review.baseBranch], review.repoRoot);
+    if (!added.ok) throw new Error(`Không mở được nhánh ${review.baseBranch} để gộp: ${added.output}`);
+    temporary = true;
+  }
+  try {
+    const merged = await git(["merge", "--no-ff", "--no-edit", "-m", `orchestrator: accept ${review.branch}`, review.branch], mergeDir);
+    if (!merged.ok) {
+      await git(["merge", "--abort"], mergeDir);
+      throw new Error(`Không thể apply thay đổi vào ${review.baseBranch}: ${merged.output || "git merge thất bại"}`);
+    }
+  } finally {
+    if (temporary) {
+      await git(["worktree", "remove", "--force", mergeDir], review.repoRoot);
+      await git(["worktree", "prune"], review.repoRoot);
+    }
   }
   await cleanupReviewWorkspace(review);
+}
+
+/** The directory where `branch` is checked out (main repo or any worktree), or null. */
+async function checkedOutAt(repoRoot, branch) {
+  const res = await git(["worktree", "list", "--porcelain"], repoRoot);
+  if (!res.ok) return null;
+  let dir = null;
+  for (const line of res.output.split("\n")) {
+    if (line.startsWith("worktree ")) dir = line.slice("worktree ".length).trim();
+    else if (line.trim() === `branch refs/heads/${branch}`) return dir ? path.resolve(dir) : null;
+  }
+  return null;
 }
 
 async function declineWorkspaceReview(review) {
@@ -523,6 +660,8 @@ async function declineWorkspaceReview(review) {
 }
 
 export {
+  listBranches,
+  prepareTargetBranch,
   openWorkspaceSession,
   createWorktree,
   integrateWorktree,

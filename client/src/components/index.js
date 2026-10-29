@@ -11,3 +11,5 @@ export { default as FormActions } from "./FormActions.jsx";
 export { default as SegmentedControl } from "./SegmentedControl.jsx";
 export { default as TabBar } from "./TabBar.jsx";
 export { default as TabPageHeader } from "./TabPageHeader.jsx";
+export { default as ToolPermissionSelect } from "./ToolPermissionSelect.jsx";
+export { default as SpawnPolicyFields, BLANK_SPAWN_POLICY } from "./SpawnPolicyFields.jsx";

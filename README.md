@@ -1,8 +1,8 @@
 # Agents Orchestrator
 
-Run Claude Code and Codex as coordinated agents from a web UI, using the CLI logins you already have.
+Run Claude Code, Codex and Gemini (the `agy` CLI) as coordinated agents from a web UI, using the CLI logins you already have.
 
-You set up agents in the browser, wire them into a workflow graph, and hit run. The server spawns a real child process per agent, either `claude -p` or `codex exec`, and streams the output back over a WebSocket. There's no field to paste an API key anywhere, because nothing needs one. Each subprocess inherits whatever session the CLI is already signed into, so a Claude Code subscription or a ChatGPT plan with the Codex CLI is enough.
+You set up agents in the browser, wire them into a workflow graph, and hit run. The server spawns a real child process per agent, `claude -p`, `codex exec` or `agy --print`, and streams the output back over a WebSocket. There's no field to paste an API key anywhere, because nothing needs one. Each subprocess inherits whatever session the CLI is already signed into, so a Claude Code subscription, a ChatGPT plan with the Codex CLI, or a Google login for the Gemini CLI is enough.
 
 ## What's in it
 
@@ -20,8 +20,9 @@ Node 18 or newer, plus at least one of these CLIs installed and logged in:
 
 - Claude Code. Install from the official docs, then run `claude` once, or `claude auth login`. Check with `claude --version`.
 - Codex CLI. `npm install -g @openai/codex`, then `codex login`. Check with `codex --version`.
+- Antigravity CLI (`agy`), which replaced the old `gemini` command. Install it from Google, run `agy` once to sign in, and check with `agy --version`. The server also finds it at `%LOCALAPPDATA%\agy\bin\agy.exe` even when it was started before `agy` was added to PATH; `AGY_BIN` overrides the path.
 
-At startup the server probes for both. Whichever one is missing gets disabled in the agent provider dropdown with a warning, so you can't build an agent that's guaranteed to fail. If you install a CLI later, restart the server so it gets picked up.
+At startup the server probes for all three. Whichever one is missing gets disabled in the agent provider dropdown with a warning, so you can't build an agent that's guaranteed to fail. If you install a CLI later, restart the server so it gets picked up.
 
 ## Install and run
 
@@ -51,6 +52,15 @@ TARGET_DIR="C:\path\to\your\repo" npm run dev
 
 Or set it per run in the UI, which has a folder browser so you don't have to type paths.
 
+### Network access
+
+The API can start agents in any folder, so it only accepts local requests:
+
+- It listens on `127.0.0.1`. Change this with `HOST`, but requests whose `Host` header isn't `localhost`/`127.0.0.1` are still refused.
+- Browser requests (HTTP and WebSocket) must come from the UI origin. The default is `http://localhost:5173,http://127.0.0.1:5173`; override it with a comma-separated `ALLOWED_ORIGINS`.
+- `/api/internal/ask-agent` needs a random token that the server generates on each start and hands only to the `ask_agent` bridge.
+- Optional: set `ALLOWED_ROOTS` to a path list (`;`-separated on Windows, `:` elsewhere) to limit the folder browser and each run's `cwd` to those folders.
+
 ## Project layout
 
 ```
@@ -60,8 +70,18 @@ AgentOrchestrator/
 │   └── public/             # favicon, provider icons
 ├── server/
 │   ├── index.js            # Express API + WebSocket
-│   ├── orchestrator.js     # agents, workflows, run execution
-│   ├── mcp-bridge.js       # the ask_agent MCP tool (Claude only)
+│   ├── security.js         # loopback bind, Origin/Host checks, internal token, ALLOWED_ROOTS
+│   ├── orchestrator.js     # re-exports the modules below as one API
+│   ├── config.js           # model/tool lists, CLI detection, DEFAULT_CWD
+│   ├── registry.js         # agents, workflows, skills, plugins (CRUD + config files)
+│   ├── run-store.js        # run history (runs.json), event bus, usage totals
+│   ├── cli-runners.js      # spawns claude / codex, wires in the ask_agent bridge
+│   ├── executor.js         # runs: workflow graph, router, worktree merge, resume
+│   ├── workspace.js        # git worktree isolation and review
+│   ├── access.js           # access levels and how each provider maps them
+│   ├── spawn-policy.js     # spawn_agent: Team whitelist, per-run limits, supervisor ceiling
+│   ├── workflow-model.js   # workflow types, save-time validation, router labels
+│   ├── mcp-bridge.js       # the ask_agent / spawn_agent MCP tools
 │   ├── agents.config.json
 │   ├── skills.config.json
 │   ├── plugins.config.json
@@ -72,13 +92,27 @@ AgentOrchestrator/
 
 ## Agents
 
-The field that matters most is the provider, labelled "Runs on" in the form. It decides whether the agent runs through `claude -p` or `codex exec`, and the rest of the form changes to match.
+The field that matters most is the provider, labelled "Runs on" in the form. It decides whether the agent runs through `claude -p`, `codex exec` or `agy --print`, and the rest of the form changes to match.
 
-For Claude Code agents you get a model picker, a permission mode, and per-tool allow and deny lists. One entry in that tool list is worth calling out: "Spawn sub-agents" is Claude Code's `Task` tool under a friendlier name, since "task" already means something else in an app full of workflow steps. Tick it and the agent can create its own general-purpose sub-agents to work parts of a job in parallel. Ticking it is the whole setup, because the server appends usage guidance to the system prompt when the tool is allowed, so the agent works out for itself when delegating is worth it. Their output lands in the parent's log via `--forward-subagent-text` instead of collapsing into a summary. You can also give the agent a private system prompt, attach shared skills, and attach plugins.
+Each kind of permission is declared in exactly one place. The agent says what it may do on its own; that is its ceiling. A workflow says whom it may hand work to and whom it may create, and never goes above that ceiling.
 
-Codex agents look different because `codex exec` exposes less. The model dropdown is read from `~/.codex/models_cache.json`, which the CLI writes at login, so it always lists what your account can actually run and never goes stale. Permissions come down to a sandbox mode (`read-only`, `workspace-write`, or `danger-full-access`) plus a network access toggle that only applies in `workspace-write`. There are no per-tool lists and no Claude Code plugins. `ask_agent` and skills, however, work the same as they do for Claude — see below.
+On the agent that comes down to one setting, **access level**: read-only, edit the workspace, or full access. The server turns it into each CLI's own setting:
 
-The read-only switch picks safe defaults for whichever provider you're on: `plan` mode with Edit and Write blocked for Claude, a `read-only` sandbox for Codex.
+| Level | Claude permission mode | Codex sandbox | agy |
+|---|---|---|---|
+| Read-only | `plan` | `read-only` | `--mode plan` |
+| Edit the workspace | `acceptEdits` | `workspace-write` | `--mode accept-edits` |
+| Full access | `bypassPermissions` | `danger-full-access` | `--dangerously-skip-permissions` |
+
+Under "Advanced" you can pick a provider setting below that level (say, Claude `default` under full access), never above it. Codex's network toggle exists only for a full-access agent that chose the `workspace-write` sandbox.
+
+Claude agents also have a tool allowlist: a tool you don't pick is blocked outright (passed as `--disallowedTools`). One entry is Claude Code's `Task` tool, shown as "Split work internally (Claude only, unlimited)": the agent creates its own Claude sub-agents to work in parallel, with no whitelist or limits. That's different from `spawn_agent`, which is declared on a Team and limited (see below). When the tool is picked, the server adds usage guidance to the system prompt, and sub-agent output lands in the parent's log via `--forward-subagent-text`. You can also give the agent a private system prompt, attach shared skills, and attach plugins.
+
+Codex agents get their model list from `~/.codex/models_cache.json`, which the CLI writes at login. There are no per-tool lists and no Claude Code plugins. `ask_agent` and skills work the same as for Claude.
+
+Gemini agents run through `agy --print=<prompt> --output-format stream-json`. The model list comes from `agy models` at startup, so it shows what your account can actually use (Gemini, and also the Claude and GPT models agy offers). agy has no true read-only mode: in a background run it lets file edits in the working folder through and refuses shell commands, whatever `--mode` says. "Read-only" therefore uses `--mode plan`, which makes the agent plan instead of edit, and the prompt tells it to answer directly instead of writing a plan and waiting for approval. "Edit the workspace" can edit files but not run commands. Skills are prepended to the prompt as with Codex. agy.exe is a native binary, so a multi-line prompt can go on the command line. One longer than the Windows command-line limit is written to a temp file instead, and the agent is told to read it.
+
+Agents saved before access levels existed are migrated on load: the level is read off their old fields (read-only switch, permission mode, sandbox, Gemini approval mode), and their old per-agent `spawn_agent` setting is dropped.
 
 Deleting an agent that a workflow still references is refused, and the error names the workflows so you know where to look. Duplicate and delete both go through a confirmation dialog.
 
@@ -94,25 +128,61 @@ Real Claude Code plugins, the kind with a `.claude-plugin/plugin.json`, not a re
 
 ## Workflows
 
-The graph supports a few things a straight chain can't:
+A workflow is one of two types, picked when you create it and fixed after that. The editor only shows what belongs to the type you picked.
 
-Multiple outgoing edges from a node run at the same time. Multiple incoming edges make a merge node that waits for all of them. A router node compares its own output against a condition label on each outgoing edge and takes exactly one branch, marking the rest skipped so they never spend a token.
+**Pipeline** is a node graph, which supports a few things a straight chain can't. Several outgoing edges from a node run at the same time. Several incoming edges make a merge node that waits for all of them. A router node takes exactly one branch: its prompt automatically asks it to end with a line `ROUTE: <label>`, and the label must match one outgoing edge's label exactly (case-insensitive). The other branches are skipped, so they never spend a token. If the router names no real branch, it fails rather than guess.
 
-Two-way calls are the interesting one. A node can call another node's agent while it's still running, block until the answer comes back, then carry on with it. That's what lets a project manager agent hand work to an engineer, wait for real code, pass it to a reviewer, and decide from the review whether to loop back. Nodes marked manual-only (`autoStart: false`) sit out the normal graph traversal entirely and run only when something calls them this way.
+A node can also hand work to another node while it's still running, block until the answer comes back, then carry on with it. You grant this per node under "Can hand work to". Nodes marked "only runs when handed work" (`autoStart: false`) sit out the normal graph traversal entirely and run only when something hands them work this way. Every node has its own id, something like `nwvl6e3`, shown on the canvas and in the node panel with a copy button. That id, not the agent id from the Agents tab, is what `ask_agent` takes.
 
-Every node carries its own id, something like `nwvl6e3`, shown on the canvas and in the node panel with a copy button. That id, not the agent id from the Agents tab, is what `ask_agent` takes.
+**Team** is the shape for a project manager running a group. You pick one coordinator agent and describe the process, then list members, each with a readable alias (`fe-main`, `fe-backup`, `reviewer`), an agent, and a role. Permissions follow from that: the coordinator can hand work to every member, and members don't call back. The member list, roles and `workItemId` rules go into the `ask_agent` tool description, so the coordinator's prompt only has to describe the process; the user's request is appended to it. `spawn_agent` and its limits are set on the team too, and apply to its coordinator only. Under the hood a team is saved as an ordinary graph: one auto-start `coordinator` node plus a manual node per member, keyed by alias. So runs, resume and the bridge work the same way for both types.
+
+Saving is validated on the server, and problems come back as a list (`400 { errors: [{ code, params }] }`) instead of being silently dropped. Examples: a manual node nobody can hand work to, a manual node with edges, a router branch without a label or with a duplicate one, a loop, a hand-written prompt without `{{previous}}` on a node that has input, or a malformed or duplicate member alias.
+
+A run executes against a copy of the workflow taken when it started. Editing the workflow mid-run, or before a resume, doesn't change that run, and `ask_agent` checks permissions against the copy as well.
 
 Every `ask_agent` call also carries a stable `workItemId`. The first call claims that logical work item for one target node; later calls may continue the same work with that same node, but cannot hand it to a different node. Failover is unlocked only when the previous CLI attempt is machine-classified as `quota` or `provider_unavailable`. A genuinely distinct subtask must use a new `workItemId` and an explicit `parentWorkItemId` (`root` means it was split directly from the user's original request). The server also rejects identical normalized task text being relabelled and sent to another agent.
 
 ## The agent bridge
 
-`server/mcp-bridge.js` is a plain stdio MCP server exposing the single `ask_agent` tool, and nothing in it is Claude-specific. Both CLIs run the exact same process; only the flags pointing at it differ, so `buildAgentBridgeContext` produces the environment and `buildClaudeBridgeArgs` / `buildCodexBridgeArgs` wrap it per provider. That means a Codex node can call a Claude node, a Claude node can call a Codex node, and either can call its own kind — all through the same node ids on the canvas, with the same per-node callee permissions and the same `MAX_CALL_DEPTH` guard.
+`server/mcp-bridge.js` is a plain stdio MCP server exposing up to two tools, `ask_agent` and `spawn_agent` (below), and nothing in it is Claude-specific. Both CLIs run the exact same process; only the flags pointing at it differ, so `buildAgentBridgeContext` produces the environment and `buildClaudeBridgeArgs` / `buildCodexBridgeArgs` wrap it per provider. That means a Codex node can call a Claude node, a Claude node can call a Codex node, and either can call its own kind — all through the same node ids on the canvas, with the same per-node callee permissions and the same `MAX_CALL_DEPTH` guard.
 
 Claude takes the whole server definition as one inline `--mcp-config` JSON blob. Codex has no such flag: it reads MCP servers from `[mcp_servers.<name>]` in `~/.codex/config.toml`, and `-c key=value` overrides any of it per invocation with the value parsed as TOML, so the bridge is passed as a handful of dotted overrides and nothing is written to your real config file.
 
 One of those overrides is load-bearing: `default_tools_approval_mode = "approve"`. Without it `codex exec` treats every MCP tool call as needing approval, and with no TTY to ask there is nobody to say yes, so the call comes back as `user cancelled MCP tool call` and the agent gives up. The valid values are `auto | prompt | writes | approve`, and `auto` is not sufficient. This is set on the `agent-bridge` server only, so it grants nothing beyond `ask_agent` — Codex's own shell and file tools stay behind `--sandbox` exactly as before.
 
+### spawn_agent
+
+`ask_agent` can only reach nodes that already exist in the workflow. `spawn_agent` lets a supervisor create new agents mid-run. It's declared in one place only: on a **Team** workflow, under "Let the coordinator create new agents". There you pick the providers and models the coordinator may use and the per-run limits. A Team may have no members at all, if all its coordinator does is spawn. A single agent started from the Run tab never gets `spawn_agent`.
+
+What a spawned agent may *do* is capped by the coordinator's own agent, never set by the workflow:
+
+- its access level is at most the coordinator's (it defaults to read-only unless the coordinator asks for more),
+- its Claude tools come from the coordinator's tool allowlist (for a Codex or agy coordinator, from what its level implies),
+- it never gets the `Task` tool, so it can't fan out further on its own.
+
+The server enforces all of this, not the model. The bridge sends only a random session id, and the server looks up which node is calling, under which policy, at which depth and in which folder. An agent that has a shell therefore can't claim someone else's policy by hand-crafting the request. Spawned agents are throwaway configs with no skills, plugins or bridge of their own. For Claude, every tool outside the chosen set is explicitly denied.
+
+There are three limits. `MAX_CALL_DEPTH` applies as usual. There's a cap on agents per run, which counts spawns still running so parallel calls can't overshoot it. And there's a per-run token budget counting input, output and cache-write tokens of spawned agents. The CLIs only report usage when they exit, so the budget is checked before each spawn, and agents already running can push the total a little past it. Spawned agents appear in the Run tab with their provider, model, access level and parent task, plus a running tally against the limits.
+
+### agy and the bridge
+
+agy has no per-run MCP option: servers only come from its global `~/.gemini/config/mcp_config.json`. So the first time an agy agent needs the bridge, the server registers it there once as `agent-bridge` (`node server/mcp-bridge.js`, with no environment of its own). It also adds one allow rule, `mcp(agent-bridge/*)`, to `~/.gemini/antigravity-cli/settings.json`, because headless agy auto-denies any MCP call that would need approval. Each run then passes its context (session, token, who it may call) through the agy process's environment, which agy hands on to the MCP servers it starts. In your own agy sessions the bridge has no context, so it registers no tools and does nothing. Both files are only touched when something is missing or points at an old path, and a settings file that isn't valid JSON is left alone.
+
+One known limitation: agy caches each MCP tool's description under `~/.gemini/antigravity-cli/mcp/agent-bridge/`, shared by every agy process. Two agy coordinators starting at the same moment in different workflows may briefly see each other's member list in the tool description. Permissions are still checked by the server against the right run, so this can only confuse the model, not grant anything.
+
 The prompt is fed to `codex exec` on stdin rather than as an argument. On Windows a prompt containing a newline breaks the CLI's own command-line parsing: everything after the first line is re-parsed as further arguments, the flags that follow are silently dropped, and the run dies claiming `--skip-git-repo-check was not specified`. Any agent with a private system prompt or an attached skill produces a multi-line prompt, so that was every such Codex agent.
+
+## Continuing a run
+
+A finished run has a chat box under its tasks. A message there goes to the run's lead agent: the agent of a single-agent run, a Team's coordinator (which can still hand work to its members and spawn agents as before), or the Pipeline step that finished last. It shows up as a "Follow-up" task in the same run.
+
+The agent keeps its context. Claude resumes its own session with `--resume`, and agy with `--conversation`. Claude stores sessions per working directory, so a follow-up runs in the same folder the session started in: the run's review folder, or the node's own worktree in a workflow. If there's no session to resume (Codex, whose resume command couldn't be verified here), or resuming fails, the message is sent with the conversation so far attached instead.
+
+Changes waiting for Accept or Decline don't block the chat. The review branch is kept until you decide, so the next turn reopens it and keeps editing the unaccepted code, and the review it ends with covers every turn since the original base: one Accept takes them all.
+
+The chat box sits next to the run's diagram in a panel that stays in view while the task list scrolls. While the agent is working it shows a Stop button (the same as stopping the run). Each chat turn can be deleted, or the whole chat cleared, together with the hand-offs and spawned agents that turn caused. The agent forgets deleted turns too: Claude starts a new session for every turn (`--fork-session`), so the next turn resumes from the session before the deleted one; agy keeps one conversation for all turns, so after a delete it gets a transcript of what's left. Deleting a chat doesn't undo code changes.
+
+Nothing in the Run tab changes workflow config: diagrams there are read-only, and runs, resume and chat all work from the run's own snapshot of the workflow. `server/run-isolation.test.js` checks this.
 
 ## Stopping and resuming
 
@@ -123,6 +193,12 @@ Every node transition is checkpointed onto the run — status, output, and any r
 The interrupted attempt's tasks stay in the history and the new attempt appends its own, so the log shows both tries. That means one node id can own several tasks, and the canvas takes the most recent rather than the first.
 
 A run replays against the graph snapshot taken when it started (`workflowNodes`/`workflowEdges`/`workflowIsolation` on the run), not the live workflow — editing a workflow shouldn't silently rewrite a run already in flight, and the checkpoint is keyed by those node ids.
+
+## Target branch
+
+The Run form has a "Target git branch" picker, filled from the local branches of the repo the working directory is in. Pick an existing branch, or tick "Create a new branch for this run" and name one; it's created from the picked branch when the run starts (names are checked with `git check-ref-format`, and `ao/*` is reserved for our scratch branches). The default is whatever is checked out.
+
+The run's review worktree forks from the target branch's tip, and Accept merges into that branch. If the branch is checked out somewhere (the repo itself or another worktree), the merge happens there so those files update, and that checkout must be clean. If it isn't checked out anywhere, the merge happens in a temporary worktree and your repo stays on whatever branch it's on, uncommitted changes included. Only a run that targets the checked-out branch still requires a clean repo to start. Chat turns and resumes land on the same branch. `server/workspace-branch.test.js` covers this against a real git repo.
 
 ## Workspace isolation
 

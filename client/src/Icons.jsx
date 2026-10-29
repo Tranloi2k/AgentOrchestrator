@@ -208,17 +208,37 @@ export function IconProviderCodex({ size = 18, title }) {
   );
 }
 
-export function ProviderIcon({ provider = "claude", size = 18, title }) {
-  const isCodex = provider === "codex";
-  const label = title || (isCodex ? "Codex" : "Claude Code");
+/** Plain four-point sparkle in Gemini-ish blues — drawn here, not a copied logo file. */
+export function IconProviderGemini({ size = 18, title }) {
   return (
-    <span
-      className={`provider-icon ${isCodex ? "provider-icon-codex" : "provider-icon-claude"}`}
-      title={label}
-      aria-label={label}
-      role="img"
-    >
-      {isCodex ? <IconProviderCodex size={size} title={label} /> : <IconProviderClaude size={size} title={label} />}
+    <svg width={size} height={size} viewBox="0 0 24 24" role="img" aria-label={title || "Gemini"}>
+      <defs>
+        <linearGradient id="provider-gemini-gradient" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#4285f4" />
+          <stop offset="1" stopColor="#9b72cb" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M12 1.5c.6 5.6 4.9 9.9 10.5 10.5-5.6.6-9.9 4.9-10.5 10.5C11.4 16.9 7.1 12.6 1.5 12 7.1 11.4 11.4 7.1 12 1.5Z"
+        fill="url(#provider-gemini-gradient)"
+      />
+    </svg>
+  );
+}
+
+const PROVIDER_ICONS = {
+  claude: { Icon: IconProviderClaude, label: "Claude Code" },
+  codex: { Icon: IconProviderCodex, label: "Codex" },
+  gemini: { Icon: IconProviderGemini, label: "Gemini" },
+};
+
+export function ProviderIcon({ provider = "claude", size = 18, title }) {
+  const key = PROVIDER_ICONS[provider] ? provider : "claude";
+  const { Icon, label: fallbackLabel } = PROVIDER_ICONS[key];
+  const label = title || fallbackLabel;
+  return (
+    <span className={`provider-icon provider-icon-${key}`} title={label} aria-label={label} role="img">
+      <Icon size={size} title={label} />
     </span>
   );
 }

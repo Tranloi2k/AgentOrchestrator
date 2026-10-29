@@ -5,6 +5,10 @@ import WorkflowCanvas from "./WorkflowCanvas.jsx";
 import DirBrowserModal from "./DirBrowserModal.jsx";
 import { IconPlay, IconTrash, ProviderIcon } from "./Icons.jsx";
 import { usePreferences } from "./PreferencesContext.jsx";
+import { nodeDisplay, callEdgesOf } from "./workflowDisplay.js";
+import RunChatBox from "./RunChatBox.jsx";
+import BranchPicker from "./BranchPicker.jsx";
+import ReviewPanel from "./ReviewPanel.jsx";
 import {
   Badge,
   Button,
@@ -51,7 +55,33 @@ function getLogLineClass(line) {
   return "log-default";
 }
 
-const TaskCard = React.memo(function TaskCard({ task }) {
+/** Same token count the server's spawn budget uses: input + output + cache writes. */
+function spawnTokens(task) {
+  const u = task.usage;
+  return u ? (u.inputTokens || 0) + (u.outputTokens || 0) + (u.cacheCreationTokens || 0) : 0;
+}
+
+/** One line under a spawned agent's title: what it runs on, what it may use, who created it. */
+function SpawnMeta({ task, parentTitle }) {
+  const { t } = usePreferences();
+  const s = task.spawn;
+  const level = t(`agents.access.${s.accessLevel || "read"}`);
+  const access =
+    s.provider !== "claude"
+      ? level
+      : `${level} · ${s.tools?.length ? t("run.spawn.tools", { tools: s.tools.join(", ") }) : t("run.spawn.noTools")}`;
+  return (
+    <div className="task-spawn-meta">
+      <ProviderIcon provider={s.provider} size={13} title={t(`agents.provider.${s.provider}`)} />
+      <span>{s.model || t("run.spawn.defaultModel")}</span>
+      <span>· {access}</span>
+      {parentTitle && <span>· {t("run.spawn.by", { name: parentTitle })}</span>}
+      {task.usage && <span>· {t("run.spawn.tokens", { count: spawnTokens(task).toLocaleString() })}</span>}
+    </div>
+  );
+}
+
+const TaskCard = React.memo(function TaskCard({ task, parentTitle, onDeleteTurn }) {
   const { t } = usePreferences();
   const [open, setOpen] = useState(true);
   const [visibleLogCount, setVisibleLogCount] = useState(INITIAL_LOG_LIMIT);
@@ -67,6 +97,8 @@ const TaskCard = React.memo(function TaskCard({ task }) {
       "workflow-node": "kind.step",
       "workflow-router": "kind.router",
       "agent-call": "kind.agentCall",
+      "agent-spawn": "kind.spawn",
+      followup: "kind.followup",
       workspace: "kind.workspace",
       resume: "kind.resume",
     }[task.kind] || "kind.agent";
@@ -120,7 +152,22 @@ const TaskCard = React.memo(function TaskCard({ task }) {
           {task.title}
         </span>
         <Badge variant={task.status}>{t(`status.${task.status}`)}</Badge>
+        {onDeleteTurn && (
+          <button
+            type="button"
+            className="task-delete"
+            title={t("run.chat.deleteTurn")}
+            aria-label={t("run.chat.deleteTurn")}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDeleteTurn();
+            }}
+          >
+            <IconTrash size={12} />
+          </button>
+        )}
       </div>
+      {task.spawn && <SpawnMeta task={task} parentTitle={parentTitle} />}
       {open && (
         <div className="task-log" ref={logRef} onScroll={handleLogScroll}>
           {hiddenLogCount > 0 && (
@@ -147,6 +194,29 @@ const TaskCard = React.memo(function TaskCard({ task }) {
     </div>
   );
 });
+
+/** Run-level tally of spawn_agent use against the supervisor's limits (taken from the latest
+ * spawned task, which records the limits it was created under). Hidden when nothing was spawned. */
+function SpawnSummary({ tasks }) {
+  const { t } = usePreferences();
+  const spawned = tasks.filter((task) => task.kind === "agent-spawn");
+  if (!spawned.length) return null;
+  const limits = spawned[spawned.length - 1].spawn?.limits || {};
+  const tokens = spawned.reduce((sum, task) => sum + spawnTokens(task), 0);
+  const running = spawned.filter((task) => task.status === "running").length;
+  return (
+    <div className="run-spawn-summary">
+      🧬{" "}
+      {t("run.spawn.summary", {
+        count: spawned.length,
+        max: limits.maxAgents ?? "?",
+        tokens: tokens.toLocaleString(),
+        budget: limits.tokenBudget ? limits.tokenBudget.toLocaleString() : "∞",
+      })}
+      {running > 0 && <span> · {t("run.spawn.running", { count: running })}</span>}
+    </div>
+  );
+}
 
 /** A resumed run re-runs some nodes, so one nodeId can have several tasks across attempts.
  * The canvas should reflect the latest attempt, not the first one still sitting in history. */
@@ -200,105 +270,6 @@ function QuotaStrip({ quota }) {
   );
 }
 
-function filePatch(patch, filePath) {
-  if (!patch) return "";
-  const sections = patch.split(/(?=^diff --git )/m).filter(Boolean);
-  return (
-    sections.find((section) =>
-      section.split("\n", 1)[0].endsWith(` b/${filePath}`),
-    ) || patch
-  );
-}
-
-function DiffLine({ line }) {
-  const className = line.startsWith("+") && !line.startsWith("+++")
-    ? "diff-add"
-    : line.startsWith("-") && !line.startsWith("---")
-      ? "diff-delete"
-      : line.startsWith("@@")
-        ? "diff-hunk"
-        : line.startsWith("diff ") || line.startsWith("index ")
-          ? "diff-meta"
-          : "";
-  return <span className={className}>{line || " "}</span>;
-}
-
-function RunReview({ review, busy, onAccept, onDecline }) {
-  const { t } = usePreferences();
-  const [selectedPath, setSelectedPath] = useState(review?.files?.[0]?.path || "");
-
-  useEffect(() => {
-    if (!review?.files?.some((file) => file.path === selectedPath)) {
-      setSelectedPath(review?.files?.[0]?.path || "");
-    }
-  }, [review, selectedPath]);
-
-  if (!review || review.status === "unavailable") {
-    return review ? (
-      <section className="run-review run-review-unavailable">
-        <strong>{t("run.review.unavailable")}</strong>
-        <span>{review.reason}</span>
-      </section>
-    ) : null;
-  }
-  if (review.status === "no_changes") {
-    return <div className="run-review-empty">✓ {t("run.review.noChanges")}</div>;
-  }
-
-  const selectedFile = review.files?.find((file) => file.path === selectedPath);
-  const selectedPatch = filePatch(review.patch, selectedPath);
-  return (
-    <section className="run-review">
-      <div className="run-review-header">
-        <div>
-          <h3>{t("run.review.title")}</h3>
-          <p>
-            {t("run.review.summary", { count: review.files?.length || 0 })} · {review.baseBranch}
-          </p>
-        </div>
-        <span className={`review-state review-state-${review.status}`}>
-          {t(`run.review.status.${review.status}`)}
-        </span>
-        {review.status === "pending" && (
-          <div className="run-review-actions">
-            <Button variant="secondary" color="danger" disabled={busy} onClick={onDecline}>
-              {t("run.review.decline")}
-            </Button>
-            <Button variant="primary" disabled={busy} onClick={onAccept}>
-              {busy ? t("run.review.processing") : t("run.review.accept")}
-            </Button>
-          </div>
-        )}
-      </div>
-      <div className="run-review-body">
-        <div className="review-file-list">
-          {review.files?.map((file) => (
-            <button
-              type="button"
-              key={`${file.previousPath || ""}-${file.path}`}
-              className={file.path === selectedPath ? "active" : ""}
-              onClick={() => setSelectedPath(file.path)}
-            >
-              <span className={`review-file-status status-${file.status}`}>{file.status}</span>
-              <span className="review-file-path">{file.path}</span>
-              {file.additions !== null && (
-                <span className="review-file-counts">
-                  <b>+{file.additions}</b> <i>-{file.deletions}</i>
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
-        <div className="review-diff">
-          <div className="review-diff-title">{selectedFile?.path}</div>
-          <pre>{selectedPatch.split("\n").map((line, index) => <DiffLine key={index} line={line} />)}</pre>
-          {review.patchTruncated && <div className="review-truncated">{t("run.review.truncated")}</div>}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 export default function RunTab({ view = "history" }) {
   const { t } = usePreferences();
   const navigate = useNavigate();
@@ -320,12 +291,27 @@ export default function RunTab({ view = "history" }) {
   const [workflowId, setWorkflowId] = useState("");
   const [decompose, setDecompose] = useState(false);
   const [cwd, setCwd] = useState("");
+  // Where the run's code lands on Accept: { branch, newBranch } — see BranchPicker.
+  const [target, setTarget] = useState({ branch: "", newBranch: "" });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [browsing, setBrowsing] = useState(false);
   // Separate from the form's `error`: a failed stop/resume belongs next to the run it happened
   // to, not under the "Run" button in the sidebar where nobody is looking.
   const [runActionError, setRunActionError] = useState("");
+  // A follow-up task (delete that turn) or "__all__" (delete the whole chat), awaiting confirmation.
+  const [deleteChatTarget, setDeleteChatTarget] = useState(null);
+  // The task list scrolls in its own box; it follows new tasks while you're at its bottom.
+  const taskListRef = useRef(null);
+  const followTasksRef = useRef(true);
+  const taskCount = selectedRun?.tasks?.length || 0;
+  useLayoutEffect(() => {
+    const el = taskListRef.current;
+    if (el && followTasksRef.current) el.scrollTop = el.scrollHeight;
+  }, [taskCount, selectedRun?.id]);
+  useEffect(() => {
+    followTasksRef.current = true;
+  }, [selectedRun?.id]);
   const [deleteTarget, setDeleteTarget] = useState(null); // run object pending delete, or "__all__"
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewDecision, setReviewDecision] = useState(null);
@@ -474,6 +460,12 @@ export default function RunTab({ view = "history" }) {
           .then((d) => setSelectedRun(d.run))
           .catch(() => {});
       }
+      if (evt.type === "run-updated") {
+        api
+          .getRun(evt.runId)
+          .then((d) => setSelectedRun((prev) => (prev?.id === evt.runId ? d.run : prev)))
+          .catch(() => {});
+      }
       if (evt.type === "review-status") {
         api
           .getRun(evt.runId)
@@ -503,7 +495,7 @@ export default function RunTab({ view = "history" }) {
             ...prev,
             tasks: prev.tasks.map((task) =>
               task.id === evt.taskId
-                ? { ...task, status: evt.status }
+                ? { ...task, status: evt.status, ...(evt.usage ? { usage: evt.usage } : {}) }
                 : task,
             ),
           };
@@ -528,8 +520,9 @@ export default function RunTab({ view = "history" }) {
     try {
       const data =
         mode === "agent"
-          ? await api.runAgent({ prompt, agentId, decompose, cwd })
-          : await api.runWorkflow({ prompt, workflowId, cwd });
+          ? await api.runAgent({ prompt, agentId, decompose, cwd, targetBranch: target.branch, newBranch: target.newBranch })
+          : await api.runWorkflow({ prompt, workflowId, cwd, targetBranch: target.branch, newBranch: target.newBranch });
+      if (target.newBranch.trim()) setTarget({ branch: target.newBranch.trim(), newBranch: "" });
       setPrompt("");
       loadQuota();
       navigate(`/run/${data.runId}`);
@@ -552,6 +545,19 @@ export default function RunTab({ view = "history" }) {
     } catch (err) {
       setRunActionError(err.message);
       setSelectedRun((prev) => (prev ? { ...prev, stopping: false } : prev));
+    }
+  }
+
+  async function confirmDeleteChat() {
+    const target = deleteChatTarget;
+    setDeleteChatTarget(null);
+    if (!selectedRun || !target) return;
+    setRunActionError("");
+    try {
+      const { run } = await api.deleteChat(selectedRun.id, target === "__all__" ? null : target.id);
+      setSelectedRun(run);
+    } catch (err) {
+      setRunActionError(err.message);
     }
   }
 
@@ -657,7 +663,7 @@ export default function RunTab({ view = "history" }) {
                 {agents.map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.name}
-                    {a.readOnly ? ` (${t("common.readOnly")})` : ""}
+                    {` (${t(`agents.access.${a.accessLevel || "write"}`)})`}
                   </option>
                 ))}
               </select>
@@ -715,6 +721,8 @@ export default function RunTab({ view = "history" }) {
               </Button>
             </div>
           </div>
+
+          <BranchPicker cwd={cwd || defaultCwd} value={target} onChange={setTarget} />
 
           <ErrorBox>{error}</ErrorBox>
 
@@ -804,6 +812,15 @@ export default function RunTab({ view = "history" }) {
         />
       )}
 
+      {deleteChatTarget && (
+        <ConfirmModal
+          title={deleteChatTarget === "__all__" ? t("run.chat.clear") : t("run.chat.deleteTurn")}
+          message={t(deleteChatTarget === "__all__" ? "run.chat.confirmClear" : "run.chat.confirmDeleteTurn")}
+          onConfirm={confirmDeleteChat}
+          onClose={() => setDeleteChatTarget(null)}
+        />
+      )}
+
       {reviewDecision === "decline" && (
         <ConfirmModal
           title={t("run.review.decline")}
@@ -823,18 +840,13 @@ export default function RunTab({ view = "history" }) {
               readOnly
               nodes={currentWorkflow.nodes.map((n) => ({
                 id: n.id,
-                title: agents.find((a) => a.id === n.agentId)?.name || "?",
-                subtitle: n.kind === "router" ? t("kind.router") : "",
+                ...nodeDisplay(n, agents, t),
                 kind: n.kind,
-                provider:
-                  agents.find((a) => a.id === n.agentId)?.provider || "claude",
                 x: n.x,
                 y: n.y,
               }))}
               edges={currentWorkflow.edges}
-              callEdges={currentWorkflow.nodes.flatMap((n) =>
-                (n.calleeNodeIds || []).map((to) => ({ from: n.id, to })),
-              )}
+              callEdges={callEdgesOf(currentWorkflow.nodes)}
             />
             <div className="empty-state-sub">{t("run.preview.hint")}</div>
           </div>
@@ -858,6 +870,11 @@ export default function RunTab({ view = "history" }) {
                 {selectedRun.decompose
                   ? t("run.meta.multi")
                   : t("run.meta.single")}{" "}
+                {selectedRun.targetBranch && (
+                  <>
+                    · <span className="run-meta-branch">⎇ {selectedRun.targetBranch}</span>{" "}
+                  </>
+                )}
                 ·{" "}
                 <Badge variant={selectedRun.status}>
                   {t(`status.${selectedRun.status}`)}
@@ -888,55 +905,89 @@ export default function RunTab({ view = "history" }) {
               <ErrorBox>{runActionError}</ErrorBox>
             </div>
             <QuotaStrip quota={quota} />
-            <RunReview
+            <ReviewPanel
               review={selectedRun.review}
               busy={reviewBusy}
               onAccept={() => handleReviewDecision("accept")}
               onDecline={() => setReviewDecision("decline")}
             />
-            {selectedRun.workflowId && selectedRun.workflowNodes && (
-              <WorkflowCanvas
-                readOnly
-                nodes={selectedRun.workflowNodes.map((n) => {
-                  const task = latestTaskForNode(selectedRun.tasks, n.id);
-                  const agent = agents.find((a) => a.id === n.agentId);
-                  return {
-                    id: n.id,
-                    title: agent?.name || n.agentId,
-                    subtitle: task
-                      ? task.status === "running"
-                        ? t("status.runningNow")
-                        : t(`status.${task.status}`)
-                      : n.kind === "router"
-                        ? t("kind.router")
-                        : "",
-                    status: task?.status,
-                    kind: n.kind,
-                    provider: agent?.provider || "claude",
-                    x: n.x,
-                    y: n.y,
-                  };
-                })}
-                edges={selectedRun.workflowEdges.map((e) => ({
-                  ...e,
-                  status: latestTaskForNode(selectedRun.tasks, e.to)?.status,
-                }))}
-                callEdges={selectedRun.workflowNodes.flatMap((n) =>
-                  (n.calleeNodeIds || []).map((to) => ({
-                    from: n.id,
-                    to,
-                    status: latestTaskForNode(
-                      selectedRun.tasks,
-                      to,
-                      "agent-call",
-                    )?.status,
-                  })),
+            <div className="run-detail">
+              <div
+                className="run-detail-main"
+                ref={taskListRef}
+                onScroll={(e) => {
+                  const el = e.currentTarget;
+                  followTasksRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+                }}
+              >
+                <SpawnSummary tasks={selectedRun.tasks} />
+                {selectedRun.tasks.map((task) => (
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    parentTitle={
+                      task.spawnedByTaskId
+                        ? selectedRun.tasks.find((p) => p.id === task.spawnedByTaskId)?.title?.slice(0, 60)
+                        : undefined
+                    }
+                    onDeleteTurn={
+                      task.kind === "followup" && selectedRun.status !== "running" ? () => setDeleteChatTarget(task) : undefined
+                    }
+                  />
+                ))}
+              </div>
+              <aside className="run-detail-side">
+                {selectedRun.workflowId && selectedRun.workflowNodes && (
+                  <div className="run-detail-diagram">
+                    <WorkflowCanvas
+                      readOnly
+                      nodes={selectedRun.workflowNodes.map((n) => {
+                        const task = latestTaskForNode(selectedRun.tasks, n.id);
+                        const display = nodeDisplay(n, agents, t);
+                        return {
+                          id: n.id,
+                          ...display,
+                          subtitle: task
+                            ? task.status === "running"
+                              ? t("status.runningNow")
+                              : t(`status.${task.status}`)
+                            : display.subtitle,
+                          status: task?.status,
+                          kind: n.kind,
+                          x: n.x,
+                          y: n.y,
+                        };
+                      })}
+                      edges={selectedRun.workflowEdges.map((e) => ({
+                        ...e,
+                        status: latestTaskForNode(selectedRun.tasks, e.to)?.status,
+                      }))}
+                      callEdges={selectedRun.workflowNodes.flatMap((n) =>
+                        (n.calleeNodeIds || []).map((to) => ({
+                          from: n.id,
+                          to,
+                          status: latestTaskForNode(
+                            selectedRun.tasks,
+                            to,
+                            "agent-call",
+                          )?.status,
+                        })),
+                      )}
+                    />
+                  </div>
                 )}
-              />
-            )}
-            {selectedRun.tasks.map((task) => (
-              <TaskCard key={task.id} task={task} />
-            ))}
+                <RunChatBox
+                  run={selectedRun}
+                  agents={agents}
+                  onSent={() => {
+                    loadRun(selectedRun.id);
+                    refreshRuns();
+                  }}
+                  onStop={handleStop}
+                  onClearChat={() => setDeleteChatTarget("__all__")}
+                />
+              </aside>
+            </div>
           </>
         )}
       </div>

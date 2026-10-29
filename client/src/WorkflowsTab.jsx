@@ -3,31 +3,34 @@ import { useNavigate } from "react-router-dom";
 import { api } from "./api.js";
 import WorkflowCanvas from "./WorkflowCanvas.jsx";
 import { Button, ConfirmModal, FormActions, TabPageHeader } from "./components/index.js";
+import { nodeDisplay, callEdgesOf } from "./workflowDisplay.js";
 import { usePreferences } from "./PreferencesContext.jsx";
 
-function WorkflowCard({ workflow, agentName, agentProvider, onEdit, onDelete }) {
+function WorkflowCard({ workflow, agents, onEdit, onDelete }) {
   const { t } = usePreferences();
   const [expanded, setExpanded] = useState(false);
+  const type = workflow.type || "pipeline";
 
   return (
     <div className="entity-card">
-      <div className="entity-card-title">{workflow.name}</div>
+      <div className="entity-card-title">
+        <span className="entity-card-title-text">{workflow.name}</span>
+      </div>
+      <div className="entity-card-tags">
+        <span className="card-tag">{t(`workflows.type.${type}`)}</span>
+      </div>
       <div className="entity-card-desc">{workflow.description}</div>
-      <div className="entity-card-meta">{t("workflows.stepCount", { count: workflow.nodes.length })}</div>
+      <div className="entity-card-meta">
+        {type === "team"
+          ? t("workflows.memberCount", { count: workflow.team?.members?.length || 0 })
+          : t("workflows.stepCount", { count: workflow.nodes.length })}
+      </div>
       {expanded && (
         <WorkflowCanvas
           readOnly
-          nodes={workflow.nodes.map((n) => ({
-            id: n.id,
-            title: agentName(n.agentId),
-            subtitle: n.kind === "router" ? t("kind.router") : n.autoStart === false ? t("workflows.manualBadge") : "",
-            kind: n.kind,
-            provider: agentProvider(n.agentId),
-            x: n.x,
-            y: n.y,
-          }))}
+          nodes={workflow.nodes.map((n) => ({ id: n.id, ...nodeDisplay(n, agents, t), kind: n.kind, x: n.x, y: n.y }))}
           edges={workflow.edges}
-          callEdges={workflow.nodes.flatMap((n) => (n.calleeNodeIds || []).map((to) => ({ from: n.id, to })))}
+          callEdges={callEdgesOf(workflow.nodes)}
         />
       )}
       <FormActions>
@@ -69,8 +72,6 @@ export default function WorkflowsTab() {
     refresh();
   }
 
-  const agentName = (aid) => agents.find((a) => a.id === aid)?.name || t("workflows.deletedAgent");
-  const agentProvider = (aid) => agents.find((a) => a.id === aid)?.provider || "claude";
 
   return (
     <div className="tab-content">
@@ -87,8 +88,7 @@ export default function WorkflowsTab() {
           <WorkflowCard
             key={w.id}
             workflow={w}
-            agentName={agentName}
-            agentProvider={agentProvider}
+            agents={agents}
             onEdit={() => navigate(`/workflows/${w.id}`)}
             onDelete={() => setConfirmTarget(w)}
           />

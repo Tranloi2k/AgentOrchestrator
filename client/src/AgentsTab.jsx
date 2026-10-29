@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "./api.js";
 import { ProviderIcon } from "./Icons.jsx";
 import { usePreferences } from "./PreferencesContext.jsx";
-import { Badge, Button, ConfirmModal, FormActions, TabPageHeader } from "./components/index.js";
+import { Button, ConfirmModal, FormActions, TabPageHeader } from "./components/index.js";
 
 export default function AgentsTab() {
   const navigate = useNavigate();
@@ -14,7 +14,7 @@ export default function AgentsTab() {
   const [workflows, setWorkflows] = useState([]);
   const [confirmTarget, setConfirmTarget] = useState(null);
   const [duplicateTarget, setDuplicateTarget] = useState(null);
-  const [providerAvailability, setProviderAvailability] = useState({ claude: true, codex: true });
+  const [providerAvailability, setProviderAvailability] = useState({ claude: true, codex: true, gemini: true });
 
   function refresh() {
     api.listAgents().then((d) => setAgents(d.agents));
@@ -61,35 +61,29 @@ export default function AgentsTab() {
             <div className="entity-card-title">
               <ProviderIcon
                 provider={a.provider || "claude"}
-                title={t(a.provider === "codex" ? "agents.provider.codex" : "agents.provider.claude")}
+                title={t(`agents.provider.${a.provider || "claude"}`)}
               />
               <span className="entity-card-title-text">{a.name}</span>
-              {a.readOnly && <Badge variant="pending">{t("common.readOnly")}</Badge>}
+            </div>
+            <div className="entity-card-tags">
+              <span className={`card-tag card-tag-access-${a.accessLevel || "write"}`}>{t(`agents.access.${a.accessLevel || "write"}`)}</span>
               {!providerAvailability[a.provider || "claude"] && (
-                <Badge variant="error" title={t("agents.provider.unavailableWarning", { name: t(a.provider === "codex" ? "agents.provider.codex" : "agents.provider.claude") })}>
+                <span
+                  className="card-tag card-tag-error"
+                  title={t("agents.provider.unavailableWarning", { name: t(`agents.provider.${a.provider || "claude"}`) })}
+                >
                   {t("agents.provider.notInstalled")}
-                </Badge>
+                </span>
               )}
             </div>
             <div className="entity-card-desc">{a.description}</div>
-            {a.provider === "codex" ? (
-              <>
-                <div className="entity-card-meta">
-                  {t("agents.meta.model")}: {a.model || t("common.default")} · {t("agents.codexSandbox")}: {a.codexSandbox}
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="entity-card-meta">
-                  {t("agents.meta.model")}: {a.model || t("common.default")} · {t("agents.meta.mode")}: {a.permissionMode}
-                </div>
-                <div className="entity-card-meta">
-                  {t("agents.meta.allow")}: {(a.allowedTools || []).join(", ") || "-"}
-                </div>
-                <div className="entity-card-meta">
-                  {t("agents.meta.deny")}: {(a.disallowedTools || []).join(", ") || "-"}
-                </div>
-              </>
+            <div className="entity-card-meta">
+              {t("agents.meta.model")}: {a.model || t("common.default")}
+            </div>
+            {(a.provider || "claude") === "claude" && (
+              <div className="entity-card-meta">
+                {t("agents.meta.allow")}: {(a.allowedTools || []).join(", ") || "-"}
+              </div>
             )}
             {!!a.skillIds?.length && (
               <div className="entity-card-meta">

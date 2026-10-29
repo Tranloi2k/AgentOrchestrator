@@ -108,7 +108,7 @@ function classifyAgentFailure({ providerAvailable = true, spawnError = null, exi
   const text = `${stderr}\n${resultText}\n${spawnError?.message || ""}`.toLocaleLowerCase();
   if (
     quotaSignal ||
-    /(?:rate[\s_-]*limit|usage[\s_-]*limit|token[\s_-]*limit|request[\s_-]*limit|quota|credit balance|too many requests|http\s*429|status\s*429|(?:usage|quota|token|request) limit (?:has been )?(?:reached|exceeded)|resets? at)/i.test(text)
+    /(?:rate[\s_-]*limit|usage[\s_-]*limit|token[\s_-]*limit|request[\s_-]*limit|quota|resource[\s_-]*exhausted|credit balance|too many requests|http\s*429|status\s*429|(?:usage|quota|token|request) limit (?:has been )?(?:reached|exceeded)|resets? at)/i.test(text)
   ) {
     return "quota";
   }

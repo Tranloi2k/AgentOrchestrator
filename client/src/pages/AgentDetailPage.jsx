@@ -3,9 +3,19 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { usePreferences } from "../PreferencesContext.jsx";
 import DetailPage, { DetailSection, DetailField, DetailFieldGrid } from "../components/DetailPage.jsx";
-import { TextInput, Select, Textarea, CheckboxField, ChipSelect, HelperText, ErrorBox } from "../components/index.js";
+import {
+  TextInput,
+  Select,
+  Textarea,
+  CheckboxField,
+  ChipSelect,
+  ToolPermissionSelect,
+  HelperText,
+  ErrorBox,
+} from "../components/index.js";
 
-const PERMISSION_MODES = ["acceptEdits", "plan", "auto", "bypassPermissions", "manual", "dontAsk"];
+const PROVIDERS = ["claude", "codex", "gemini"];
+const ACCESS_LEVELS = ["read", "write", "full"];
 
 // Claude Code's sub-agent tool is literally named "Task" in the CLI — meaningless in a UI that
 // already calls every workflow step a task, so it gets a plain-language label + tooltip. Every
@@ -15,17 +25,24 @@ const RENAMED_TOOLS = {
   [SUBAGENT_TOOL]: { labelKey: "agents.tool.subagent", titleKey: "agents.tool.subagent.desc" },
 };
 
+// Provider settings derived from the access level (server/access.js). "Advanced" may only pick
+// a value at or below the level; changing the level resets them to that level's default.
+const ADVANCED_FIELDS = ["permissionMode", "codexSandbox", "agyMode"];
+
 const BLANK = {
   name: "",
   description: "",
   provider: "claude",
   model: "",
-  readOnly: false,
+  accessLevel: "write",
   permissionMode: "acceptEdits",
-  allowedTools: [],
-  disallowedTools: [],
   codexSandbox: "workspace-write",
   codexNetworkAccess: false,
+  agyMode: "accept-edits",
+  // Allowlist: tools not listed here are blocked. New agents start with every tool except the
+  // sub-agent one (filled in once /api/meta says which tools exist).
+  toolPolicy: "allowlist",
+  allowedTools: [],
   appendSystemPrompt: "",
   skillIds: [],
   pluginIds: [],
@@ -37,24 +54,17 @@ export default function AgentDetailPage() {
   const navigate = useNavigate();
   const { t } = usePreferences();
   const [form, setForm] = useState(BLANK);
-  const [models, setModels] = useState([]);
-  const [tools, setTools] = useState([]);
+  const [meta, setMeta] = useState(null);
   const [skills, setSkills] = useState([]);
   const [plugins, setPlugins] = useState([]);
-  const [codexSandboxModes, setCodexSandboxModes] = useState([]);
-  const [codexModels, setCodexModels] = useState([]);
-  const [providerAvailability, setProviderAvailability] = useState({ claude: true, codex: true });
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     api.meta().then((d) => {
-      setModels(d.models);
-      setTools(d.tools);
-      setCodexSandboxModes(d.codexSandboxModes || []);
-      setCodexModels(d.codexModels || []);
-      if (d.providerAvailability) setProviderAvailability(d.providerAvailability);
+      setMeta(d);
+      if (isNew) setForm((f) => ({ ...f, allowedTools: d.tools.filter((tool) => tool !== SUBAGENT_TOOL) }));
     });
     api.listSkills().then((d) => setSkills(d.skills));
     api.listPlugins().then((d) => setPlugins(d.plugins));
@@ -68,7 +78,6 @@ export default function AgentDetailPage() {
           ...BLANK,
           ...agent,
           allowedTools: Array.isArray(agent.allowedTools) ? agent.allowedTools : [],
-          disallowedTools: Array.isArray(agent.disallowedTools) ? agent.disallowedTools : [],
           skillIds: Array.isArray(agent.skillIds) ? agent.skillIds : [],
           pluginIds: Array.isArray(agent.pluginIds) ? agent.pluginIds : [],
         });
@@ -77,19 +86,30 @@ export default function AgentDetailPage() {
     });
   }, [id, isNew]);
 
-  function handleReadOnlyToggle(checked) {
-    setForm((f) => ({
-      ...f,
-      readOnly: checked,
-      permissionMode: checked ? "plan" : "acceptEdits",
-      disallowedTools: checked ? Array.from(new Set([...f.disallowedTools, "Edit", "Write"])) : f.disallowedTools,
-      codexSandbox: checked ? "read-only" : "workspace-write",
-    }));
+  const providerAvailability = meta?.providerAvailability || { claude: true, codex: true, gemini: true };
+  const levelOptions = meta?.accessOptions?.[form.accessLevel] || {};
+
+  /** A new level resets the provider settings to that level's default (the last allowed value). */
+  function setAccessLevel(accessLevel) {
+    const options = meta?.accessOptions?.[accessLevel] || {};
+    const defaults = Object.fromEntries(ADVANCED_FIELDS.map((field) => [field, (options[field] || []).at(-1)]).filter(([, v]) => v));
+    setForm((f) => ({ ...f, accessLevel, ...defaults, codexNetworkAccess: false }));
   }
 
   const isCodex = form.provider === "codex";
+  const isGemini = form.provider === "gemini";
+  const isClaude = !isCodex && !isGemini;
+  const providerOptions = PROVIDERS.map((p) => ({
+    value: p,
+    label: providerAvailability[p] ? t(`agents.provider.${p}`) : t("agents.provider.notFound", { name: t(`agents.provider.${p}`) }),
+    disabled: !providerAvailability[p],
+  }));
+  const modelOptions = ((isCodex ? meta?.codexModels : isGemini ? meta?.geminiModels : meta?.models) || []).map((m) => ({
+    value: m.value,
+    label: m.label,
+  }));
 
-  const toolOptions = tools.map((tool) => {
+  const toolOptions = (meta?.tools || []).map((tool) => {
     const renamed = RENAMED_TOOLS[tool];
     return {
       value: tool,
@@ -123,6 +143,39 @@ export default function AgentDetailPage() {
     );
   }
 
+  const advanced = isCodex ? (
+    <>
+      <Select
+        label={t("agents.codexSandbox")}
+        value={form.codexSandbox}
+        onChange={(e) => setForm({ ...form, codexSandbox: e.target.value, codexNetworkAccess: false })}
+        options={(levelOptions.codexSandbox || []).map((m) => ({ value: m, label: m }))}
+      />
+      {form.accessLevel === "full" && form.codexSandbox === "workspace-write" && (
+        <CheckboxField
+          id="codexNetworkAccess"
+          checked={form.codexNetworkAccess}
+          onChange={(checked) => setForm((f) => ({ ...f, codexNetworkAccess: checked }))}
+          label={t("agents.codexNetworkAccess")}
+        />
+      )}
+    </>
+  ) : isGemini ? (
+    <Select
+      label={t("agents.agyMode")}
+      value={form.agyMode}
+      onChange={(e) => setForm({ ...form, agyMode: e.target.value })}
+      options={(levelOptions.agyMode || []).map((m) => ({ value: m, label: t(`agents.agyMode.${m}`) }))}
+    />
+  ) : (
+    <Select
+      label={t("agents.permissionMode")}
+      value={form.permissionMode}
+      onChange={(e) => setForm({ ...form, permissionMode: e.target.value })}
+      options={(levelOptions.permissionMode || []).map((m) => ({ value: m, label: m }))}
+    />
+  );
+
   return (
     <DetailPage
       breadcrumbs={[
@@ -138,49 +191,20 @@ export default function AgentDetailPage() {
     >
       <DetailSection title={t("detail.section.general")}>
         <DetailFieldGrid>
-          <TextInput
-            label={t("agents.name")}
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
-          />
+          <TextInput label={t("agents.name")} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <Select
             label={t("agents.provider")}
             value={form.provider}
-            onChange={(e) => setForm({ ...form, provider: e.target.value })}
-            options={[
-              {
-                value: "claude",
-                label: providerAvailability.claude ? t("agents.provider.claude") : t("agents.provider.notFound", { name: t("agents.provider.claude") }),
-                disabled: !providerAvailability.claude,
-              },
-              {
-                value: "codex",
-                label: providerAvailability.codex ? t("agents.provider.codex") : t("agents.provider.notFound", { name: t("agents.provider.codex") }),
-                disabled: !providerAvailability.codex,
-              },
-            ]}
+            onChange={(e) => setForm({ ...form, provider: e.target.value, model: "" })}
+            options={providerOptions}
           />
         </DetailFieldGrid>
         <HelperText>{t("agents.provider.hint")}</HelperText>
         {!providerAvailability[form.provider] && (
-          <ErrorBox>{t("agents.provider.unavailableWarning", { name: t(isCodex ? "agents.provider.codex" : "agents.provider.claude") })}</ErrorBox>
+          <ErrorBox>{t("agents.provider.unavailableWarning", { name: t(`agents.provider.${form.provider}`) })}</ErrorBox>
         )}
         <DetailFieldGrid>
-          {isCodex ? (
-            <Select
-              label={t("agents.model")}
-              value={form.model}
-              onChange={(e) => setForm({ ...form, model: e.target.value })}
-              options={codexModels.map((m) => ({ value: m.value, label: m.label }))}
-            />
-          ) : (
-            <Select
-              label={t("agents.model")}
-              value={form.model}
-              onChange={(e) => setForm({ ...form, model: e.target.value })}
-              options={models.map((m) => ({ value: m.value, label: m.label }))}
-            />
-          )}
+          <Select label={t("agents.model")} value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} options={modelOptions} />
         </DetailFieldGrid>
         <TextInput
           label={t("agents.description")}
@@ -190,57 +214,30 @@ export default function AgentDetailPage() {
         />
       </DetailSection>
 
-      <DetailSection title={t("detail.section.permissions")}>
-        <CheckboxField
-          id="readOnly"
-          checked={form.readOnly}
-          onChange={handleReadOnlyToggle}
-          label={t("agents.readOnly")}
+      <DetailSection title={t("detail.section.permissions")} description={t("agents.access.sectionHint")}>
+        <Select
+          label={t("agents.access")}
+          value={form.accessLevel}
+          onChange={(e) => setAccessLevel(e.target.value)}
+          options={ACCESS_LEVELS.map((level) => ({ value: level, label: t(`agents.access.${level}`) }))}
         />
-        {isCodex ? (
-          <>
-            <Select
-              label={t("agents.codexSandbox")}
-              value={form.codexSandbox}
-              onChange={(e) => setForm({ ...form, codexSandbox: e.target.value })}
-              options={codexSandboxModes.map((m) => ({ value: m, label: m }))}
-            />
-            {form.codexSandbox === "workspace-write" && (
-              <CheckboxField
-                id="codexNetworkAccess"
-                checked={form.codexNetworkAccess}
-                onChange={(checked) => setForm((f) => ({ ...f, codexNetworkAccess: checked }))}
-                label={t("agents.codexNetworkAccess")}
-              />
-            )}
-          </>
-        ) : (
-          <Select
-            label={t("agents.permissionMode")}
-            value={form.permissionMode}
-            onChange={(e) => setForm({ ...form, permissionMode: e.target.value })}
-            options={PERMISSION_MODES.map((m) => ({ value: m, label: m }))}
-          />
-        )}
+        <HelperText>{t(`agents.access.${form.accessLevel}.desc.${form.provider}`)}</HelperText>
+        <details className="advanced-settings">
+          <summary>{t("agents.access.advanced")}</summary>
+          <div className="advanced-settings-body">
+            {advanced}
+            <HelperText>{t("agents.access.advancedHint")}</HelperText>
+          </div>
+        </details>
       </DetailSection>
 
-      {!isCodex && (
+      {isClaude && (
         <DetailSection title={t("detail.section.tools")}>
-          <DetailField label={t("agents.allowedTools")} full>
-            <ChipSelect
-              options={toolOptions}
-              selected={form.allowedTools}
-              onChange={(allowedTools) => setForm((f) => ({ ...f, allowedTools }))}
-            />
+          <DetailField label={t("agents.toolPermissions")} full>
+            <ToolPermissionSelect options={toolOptions} allowed={form.allowedTools} onChange={(allowedTools) => setForm((f) => ({ ...f, allowedTools }))} />
           </DetailField>
+          <HelperText>{t("agents.toolPermissions.hint")}</HelperText>
           {form.allowedTools.includes(SUBAGENT_TOOL) && <HelperText>{t("agents.tool.subagent.enabled")}</HelperText>}
-          <DetailField label={t("agents.disallowedTools")} full>
-            <ChipSelect
-              options={toolOptions}
-              selected={form.disallowedTools}
-              onChange={(disallowedTools) => setForm((f) => ({ ...f, disallowedTools }))}
-            />
-          </DetailField>
         </DetailSection>
       )}
 
@@ -261,8 +258,8 @@ export default function AgentDetailPage() {
             emptyMessage={t("agents.noSkills")}
           />
         </DetailField>
-        {isCodex ? (
-          <HelperText>{t("agents.codexSkillsHint")}</HelperText>
+        {!isClaude ? (
+          <HelperText>{t(isGemini ? "agents.geminiSkillsHint" : "agents.codexSkillsHint")}</HelperText>
         ) : (
           <DetailField label={t("agents.plugins")} full>
             <ChipSelect

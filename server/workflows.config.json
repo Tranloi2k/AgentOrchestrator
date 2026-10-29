@@ -3,6 +3,12 @@
     "id": "g9enjVOu",
     "name": "build new feature",
     "description": "PM goi FE, doi xong, goi reviewer; reviewer bao lai PM de PM quyet dinh (lap lai neu can sua)",
+    "type": "pipeline",
+    "isolation": {
+      "enabled": false,
+      "testCommand": "",
+      "keepOnFailure": true
+    },
     "nodes": [
       {
         "id": "ng8n4t0",
@@ -55,11 +61,117 @@
         "y": 118
       }
     ],
-    "edges": [],
+    "edges": []
+  },
+  {
+    "id": "rxTeam01",
+    "name": "React feature team",
+    "description": "Coordinator chia việc, engineer (Sonnet) làm chính, engineer-agy dự phòng, reviewer duyệt và chạy check. Có thể tạo agent phụ chỉ đọc để tìm hiểu.",
+    "type": "team",
     "isolation": {
       "enabled": false,
       "testCommand": "",
       "keepOnFailure": true
-    }
+    },
+    "team": {
+      "coordinator": {
+        "agentId": "rxCoord1",
+        "process": "## Routing\n- engineer (Claude Sonnet) owns all implementation work by default.\n- engineer-agy is the backup for engineer. Hand it a work item only when ask_agent reports quota or provider_unavailable for engineer, and keep the same workItemId.\n- engineer-agy may also take a second work item in parallel, but only when the two items live in different folders and share no files.\n- engineer-agy cannot run shell commands. For its work items, the reviewer's check results are the only verification: do not ask engineer-agy to run typecheck, lint or tests.\n- reviewer never writes code. It only reviews.\n\n## Order\n1. Shared code first: types, API client, shared hooks and components. One owner, finished and reviewed before anything depends on it.\n2. Then feature work, parallel only under the rule above.\n3. Review once per work item, after its engineer reports back.\n\n## Review gate\n- Every work item that changes code goes to reviewer, with the brief, the list of changed files and the engineer's verification results.\n- Pass means reviewer answered VERDICT: PASS. Non-blocking suggestions go into the final report, not into another fix round.\n- Fix rounds go back to the owner of that work item, max 2.\n\n## This project\n- Follow AGENTS.md / CLAUDE.md if the repo has one.\n- Verify with the typecheck, lint and test scripts in package.json. If a script is missing, say so in the final report instead of inventing one.\n- Do not touch: .env files, lockfiles (unless a dependency was approved), CI config, generated code.\n\n## Done\nA work item is done only when typecheck, lint and tests pass (as run by the engineer or, for engineer-agy, by reviewer) and reviewer answered VERDICT: PASS.\n"
+      },
+      "members": [
+        {
+          "alias": "engineer",
+          "agentId": "rxEng001",
+          "role": "Main React engineer. Implements work items from a brief and reports changed files plus typecheck/lint/test results."
+        },
+        {
+          "alias": "engineer-agy",
+          "agentId": "rxEng001",
+          "role": "Backup React engineer . Can edit code but cannot run shell commands, so it reports verification as not run; reviewer runs the checks."
+        },
+        {
+          "alias": "reviewer",
+          "agentId": "rxReview",
+          "role": "Reviews one work item: runs checks, compares with the brief, answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED. Never edits files."
+        }
+      ],
+      "spawnPolicy": {
+        "enabled": true,
+        "providers": [
+          "claude"
+        ],
+        "claudeModels": [
+          "sonnet",
+          "claude-haiku-4-5-20251001"
+        ],
+        "codexModels": [],
+        "geminiModels": [],
+        "maxAgents": 3,
+        "tokenBudget": 300000
+      }
+    },
+    "nodes": [
+      {
+        "id": "coordinator",
+        "agentId": "rxCoord1",
+        "promptTemplate": "## Routing\n- engineer (Claude Sonnet) owns all implementation work by default.\n- engineer-agy is the backup for engineer. Hand it a work item only when ask_agent reports quota or provider_unavailable for engineer, and keep the same workItemId.\n- engineer-agy may also take a second work item in parallel, but only when the two items live in different folders and share no files.\n- engineer-agy cannot run shell commands. For its work items, the reviewer's check results are the only verification: do not ask engineer-agy to run typecheck, lint or tests.\n- reviewer never writes code. It only reviews.\n\n## Order\n1. Shared code first: types, API client, shared hooks and components. One owner, finished and reviewed before anything depends on it.\n2. Then feature work, parallel only under the rule above.\n3. Review once per work item, after its engineer reports back.\n\n## Review gate\n- Every work item that changes code goes to reviewer, with the brief, the list of changed files and the engineer's verification results.\n- Pass means reviewer answered VERDICT: PASS. Non-blocking suggestions go into the final report, not into another fix round.\n- Fix rounds go back to the owner of that work item, max 2.\n\n## This project\n- Follow AGENTS.md / CLAUDE.md if the repo has one.\n- Verify with the typecheck, lint and test scripts in package.json. If a script is missing, say so in the final report instead of inventing one.\n- Do not touch: .env files, lockfiles (unless a dependency was approved), CI config, generated code.\n\n## Done\nA work item is done only when typecheck, lint and tests pass (as run by the engineer or, for engineer-agy, by reviewer) and reviewer answered VERDICT: PASS.\n",
+        "kind": "agent",
+        "teamRole": "coordinator",
+        "calleeNodeIds": [
+          "engineer",
+          "engineer-agy",
+          "reviewer"
+        ],
+        "autoStart": true,
+        "spawnPolicy": {
+          "enabled": true,
+          "providers": [
+            "claude"
+          ],
+          "claudeModels": [
+            "sonnet",
+            "claude-haiku-4-5-20251001"
+          ],
+          "codexModels": [],
+          "geminiModels": [],
+          "maxAgents": 3,
+          "tokenBudget": 300000
+        }
+      },
+      {
+        "id": "engineer",
+        "agentId": "rxEng001",
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "engineer",
+        "role": "Main React engineer. Implements work items from a brief and reports changed files plus typecheck/lint/test results.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      },
+      {
+        "id": "engineer-agy",
+        "agentId": "rxEng001",
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "engineer-agy",
+        "role": "Backup React engineer . Can edit code but cannot run shell commands, so it reports verification as not run; reviewer runs the checks.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      },
+      {
+        "id": "reviewer",
+        "agentId": "rxReview",
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "reviewer",
+        "role": "Reviews one work item: runs checks, compares with the brief, answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED. Never edits files.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      }
+    ],
+    "edges": []
   }
 ]

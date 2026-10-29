@@ -72,6 +72,7 @@ test("new work requires an explicit parent and duplicate content is rejected", (
 test("failure classifier only unlocks failover for quota or unavailable provider", () => {
   assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "You've hit your usage limit" }), "quota");
   assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "HTTP 429 too many requests" }), "quota");
+  assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "[API Error: RESOURCE_EXHAUSTED]" }), "quota");
   assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "TypeScript compilation failed" }), "agent_error");
   assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "Memory limit exceeded" }), "agent_error");
   assert.equal(classifyAgentFailure({ providerAvailable: false }), "provider_unavailable");

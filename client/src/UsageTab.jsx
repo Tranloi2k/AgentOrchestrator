@@ -61,10 +61,12 @@ export default function UsageTab() {
 
   const claude = usage?.byProvider?.claude || {};
   const codex = usage?.byProvider?.codex || {};
-  const maxTokens = Math.max(totalTokens(claude), totalTokens(codex), 1);
+  const gemini = usage?.byProvider?.gemini || {};
+  const maxTokens = Math.max(totalTokens(claude), totalTokens(codex), totalTokens(gemini), 1);
   const providers = [
     { key: "claude", label: t("agents.provider.claude"), data: claude },
     { key: "codex", label: t("agents.provider.codex"), data: codex },
+    { key: "gemini", label: t("agents.provider.gemini"), data: gemini },
   ];
   const claudeQuota = usage?.quota?.claude || null;
   const claudeRemainingPct = claudeQuota ? Math.max(0, Math.round((1 - (claudeQuota.utilization || 0)) * 100)) : null;
@@ -112,6 +114,13 @@ export default function UsageTab() {
             <span className="entity-card-title-text">{t("agents.provider.codex")}</span>
           </div>
           <div className="entity-card-desc">{t("usage.quotaCodexUnavailable")}</div>
+        </div>
+        <div className="entity-card">
+          <div className="entity-card-title">
+            <ProviderIcon provider="gemini" title={t("agents.provider.gemini")} />
+            <span className="entity-card-title-text">{t("agents.provider.gemini")}</span>
+          </div>
+          <div className="entity-card-desc">{t("usage.quotaGeminiUnavailable")}</div>
         </div>
       </div>
 

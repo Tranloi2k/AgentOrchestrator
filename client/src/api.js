@@ -1,13 +1,19 @@
+/** Throws on a non-2xx response. A validation failure also carries `err.errors`
+ * ([{ code, params }]) so a form can list every problem instead of just the summary line. */
 async function json(res) {
   if (!res.ok) {
     let msg = res.statusText;
+    let errors = null;
     try {
       const d = await res.json();
       if (d?.error) msg = d.error;
+      if (Array.isArray(d?.errors)) errors = d.errors;
     } catch {
       /* ignore */
     }
-    throw new Error(msg);
+    const err = new Error(msg);
+    if (errors) err.errors = errors;
+    throw err;
   }
   return res.json();
 }
@@ -59,8 +65,13 @@ export const api = {
   clearRuns: () => fetch("/api/runs", { method: "DELETE" }).then(json),
   stopRun: (id) => fetch(`/api/runs/${id}/stop`, { method: "POST" }).then(json),
   resumeRun: (id) => fetch(`/api/runs/${id}/resume`, { method: "POST" }).then(json),
+  deleteChat: (id, turnId) =>
+    fetch(turnId ? `/api/runs/${id}/chat/${turnId}` : `/api/runs/${id}/chat`, { method: "DELETE" }).then(json),
+  continueRun: (id, message) =>
+    fetch(`/api/runs/${id}/continue`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }) }).then(json),
   acceptRunReview: (id) => fetch(`/api/runs/${id}/review/accept`, { method: "POST" }).then(json),
   declineRunReview: (id) => fetch(`/api/runs/${id}/review/decline`, { method: "POST" }).then(json),
+  gitBranches: (cwd) => fetch(`/api/git/branches?cwd=${encodeURIComponent(cwd || "")}`).then(json),
   runAgent: (data) =>
     fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json),
   runWorkflow: (data) =>

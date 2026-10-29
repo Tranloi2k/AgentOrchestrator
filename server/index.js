@@ -9,8 +9,8 @@ import {
   KNOWN_TOOLS,
   PROVIDERS,
   PROVIDER_AVAILABILITY,
-  CODEX_SANDBOX_MODES,
   CODEX_MODELS,
+  AGY_MODELS,
   listAgents,
   createAgent,
   updateAgent,
@@ -39,16 +39,42 @@ import {
   startWorkflowRun,
   stopRun,
   resumeRun,
+  continueRun,
+  deleteChat,
   askAgent,
+  spawnAgent,
   subscribe,
   DEFAULT_CWD,
 } from "./orchestrator.js";
 
+import { ACCESS_LEVELS, accessOptions } from "./access.js";
+import { listBranches, prepareTargetBranch } from "./workspace.js";
+import {
+  HOST,
+  ALLOWED_ORIGINS,
+  ALLOWED_ROOTS,
+  isLoopbackHost,
+  isPathAllowed,
+  requestGuard,
+  requireInternalToken,
+  verifyWsClient,
+} from "./security.js";
+
 const PORT = process.env.PORT || 5175;
 
 const app = express();
-app.use(cors());
+app.use(requestGuard);
+app.use(cors({ origin: ALLOWED_ORIGINS }));
 app.use(express.json());
+
+/** Rejects a run's `cwd` outside ALLOWED_ROOTS (no-op when ALLOWED_ROOTS is unset). */
+function checkCwd(cwd, res) {
+  if (cwd && !isPathAllowed(String(cwd))) {
+    res.status(403).json({ error: "cwd nằm ngoài các thư mục được phép (ALLOWED_ROOTS)" });
+    return false;
+  }
+  return true;
+}
 
 /** meta: model list, known tools, default working dir */
 app.get("/api/meta", (req, res) => {
@@ -57,8 +83,10 @@ app.get("/api/meta", (req, res) => {
     tools: KNOWN_TOOLS,
     providers: PROVIDERS,
     providerAvailability: PROVIDER_AVAILABILITY,
-    codexSandboxModes: CODEX_SANDBOX_MODES,
     codexModels: CODEX_MODELS,
+    geminiModels: AGY_MODELS,
+    accessLevels: ACCESS_LEVELS,
+    accessOptions: accessOptions(),
     defaultCwd: DEFAULT_CWD,
   });
 });
@@ -66,8 +94,12 @@ app.get("/api/meta", (req, res) => {
 /** Read-only directory browser so the UI can offer a "Browse..." picker for
  * the working-directory field without relying on a native OS file dialog. */
 app.get("/api/browse-dirs", (req, res) => {
-  let target = req.query.path ? String(req.query.path) : DEFAULT_CWD;
+  const fallback = isPathAllowed(DEFAULT_CWD) ? DEFAULT_CWD : ALLOWED_ROOTS[0];
+  let target = req.query.path ? String(req.query.path) : fallback;
   target = path.resolve(target);
+  if (!isPathAllowed(target)) {
+    return res.status(403).json({ error: "Thư mục nằm ngoài các thư mục được phép (ALLOWED_ROOTS)" });
+  }
 
   let entries;
   try {
@@ -82,7 +114,8 @@ app.get("/api/browse-dirs", (req, res) => {
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const parent = path.dirname(target);
-  res.json({ path: target, parent: parent === target ? null : parent, dirs });
+  const hasParent = parent !== target && isPathAllowed(parent);
+  res.json({ path: target, parent: hasParent ? parent : null, dirs });
 });
 
 /** ---- agents CRUD ---- */
@@ -171,14 +204,29 @@ app.get("/api/workflows", (req, res) => {
   res.json({ workflows: listWorkflows() });
 });
 
+/** A workflow that fails validation comes back as 400 with `errors: [{ code, params }]` —
+ * the full list, so the editor can show every problem at once. */
+function sendWorkflowError(res, err) {
+  if (err.errors) return res.status(400).json({ error: err.message, errors: err.errors });
+  res.status(400).json({ error: err.message });
+}
+
 app.post("/api/workflows", (req, res) => {
-  res.json({ workflow: createWorkflow(req.body || {}) });
+  try {
+    res.json({ workflow: createWorkflow(req.body || {}) });
+  } catch (err) {
+    sendWorkflowError(res, err);
+  }
 });
 
 app.put("/api/workflows/:id", (req, res) => {
-  const workflow = updateWorkflow(req.params.id, req.body || {});
-  if (!workflow) return res.status(404).json({ error: "not found" });
-  res.json({ workflow });
+  try {
+    const workflow = updateWorkflow(req.params.id, req.body || {});
+    if (!workflow) return res.status(404).json({ error: "not found" });
+    res.json({ workflow });
+  } catch (err) {
+    sendWorkflowError(res, err);
+  }
 });
 
 app.delete("/api/workflows/:id", (req, res) => {
@@ -238,6 +286,24 @@ app.delete("/api/runs", (req, res) => {
   res.json(clearRuns());
 });
 
+/** Local branches of the git repo containing `cwd` (target-branch picker); `repo: null` if not git. */
+app.get("/api/git/branches", async (req, res) => {
+  const cwd = String(req.query.cwd || DEFAULT_CWD);
+  if (!checkCwd(cwd, res)) return;
+  res.json({ repo: await listBranches(cwd) });
+});
+
+/** Settles the branch a run lands on (creating a new one if asked); sends 400 and returns
+ * undefined on a bad choice. */
+async function resolveTargetBranch(cwd, body, res) {
+  try {
+    return await prepareTargetBranch(cwd || DEFAULT_CWD, { branch: body.targetBranch, newBranch: body.newBranch });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+    return undefined;
+  }
+}
+
 app.post("/api/run", async (req, res) => {
   const { prompt, agentId, decompose, cwd } = req.body || {};
   if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
@@ -246,7 +312,10 @@ app.post("/api/run", async (req, res) => {
   if (!agentId) {
     return res.status(400).json({ error: "agentId is required" });
   }
-  const runId = await startRun({ prompt: prompt.trim(), agentId, decompose: !!decompose, cwd });
+  if (!checkCwd(cwd, res)) return;
+  const targetBranch = await resolveTargetBranch(cwd, req.body, res);
+  if (targetBranch === undefined) return;
+  const runId = await startRun({ prompt: prompt.trim(), agentId, decompose: !!decompose, cwd, targetBranch });
   res.json({ runId });
 });
 
@@ -258,8 +327,11 @@ app.post("/api/run-workflow", async (req, res) => {
   if (!workflowId) {
     return res.status(400).json({ error: "workflowId is required" });
   }
+  if (!checkCwd(cwd, res)) return;
+  const targetBranch = await resolveTargetBranch(cwd, req.body, res);
+  if (targetBranch === undefined) return;
   try {
-    const runId = await startWorkflowRun({ prompt: prompt.trim(), workflowId, cwd });
+    const runId = await startWorkflowRun({ prompt: prompt.trim(), workflowId, cwd, targetBranch });
     res.json({ runId });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -281,6 +353,31 @@ app.post("/api/runs/:id/stop", (req, res) => {
 
 /** Re-runs a stopped/crashed/failed workflow run from its last checkpoint — steps that already
  * finished keep their recorded output and are not re-run. */
+/** Sends a follow-up message to a finished run's lead agent (chat). Returns once it's started;
+ * the reply streams over the WebSocket like any task. */
+/** Deletes chat turns: one (`/chat/:turnId`) or all of them (`/chat`). See deleteChat. */
+function sendDeleteChat(req, res) {
+  try {
+    const ok = deleteChat(req.params.id, req.params.turnId || null);
+    if (!ok) return res.status(404).json({ error: "not found" });
+    res.json({ run: getRun(req.params.id) });
+  } catch (err) {
+    res.status(409).json({ error: err.message });
+  }
+}
+app.delete("/api/runs/:id/chat", sendDeleteChat);
+app.delete("/api/runs/:id/chat/:turnId", sendDeleteChat);
+
+app.post("/api/runs/:id/continue", (req, res) => {
+  try {
+    const ok = continueRun(req.params.id, req.body?.message);
+    if (!ok) return res.status(404).json({ error: "not found" });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(409).json({ error: err.message });
+  }
+});
+
 app.post("/api/runs/:id/resume", (req, res) => {
   try {
     const ok = resumeRun(req.params.id);
@@ -293,8 +390,9 @@ app.post("/api/runs/:id/resume", (req, res) => {
 
 /** Internal-only: hit by mcp-bridge.js (a side-process of a running agent) when that agent
  * calls its `ask_agent` MCP tool — this is what makes agent-to-agent calls synchronous
- * (the caller's tool call blocks until this resolves). Not meant to be called from the UI. */
-app.post("/api/internal/ask-agent", async (req, res) => {
+ * (the caller's tool call blocks until this resolves). Not meant to be called from the UI —
+ * requires the per-start token that only the bridge processes receive. */
+app.post("/api/internal/ask-agent", requireInternalToken, async (req, res) => {
   const { runId, workflowId, callerNodeId, targetNodeId, question, workItemId, parentWorkItemId, cwd, depth } = req.body || {};
   if (!runId || !workflowId || !callerNodeId || !targetNodeId || !question || !workItemId) {
     return res.status(400).json({ error: "thiếu runId/workflowId/callerNodeId/targetNodeId/question/workItemId" });
@@ -317,8 +415,22 @@ app.post("/api/internal/ask-agent", async (req, res) => {
   }
 });
 
+/** Internal-only: the bridge's `spawn_agent` tool. The caller is identified by its bridge session
+ * id alone; policy, depth and cwd come from the server's own record of that session. */
+app.post("/api/internal/spawn-agent", requireInternalToken, async (req, res) => {
+  const { sessionId, provider, model, tools, accessLevel, prompt, title } = req.body || {};
+  if (!sessionId || !prompt) {
+    return res.status(400).json({ error: "thiếu sessionId/prompt" });
+  }
+  try {
+    res.json(await spawnAgent({ sessionId, provider, model, tools, accessLevel, prompt: String(prompt), title }));
+  } catch (err) {
+    res.status(409).json({ error: err.message });
+  }
+});
+
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: "/ws" });
+const wss = new WebSocketServer({ server, path: "/ws", verifyClient: verifyWsClient });
 
 wss.on("connection", (ws) => {
   const unsubscribe = subscribe((event) => {
@@ -329,7 +441,12 @@ wss.on("connection", (ws) => {
   ws.on("close", unsubscribe);
 });
 
-server.listen(PORT, () => {
-  console.log(`[orchestrator] server listening on http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`[orchestrator] server listening on http://${HOST}:${PORT}`);
   console.log(`[orchestrator] default target dir: ${DEFAULT_CWD}`);
+  console.log(`[orchestrator] allowed origins: ${ALLOWED_ORIGINS.join(", ")}`);
+  if (ALLOWED_ROOTS.length) console.log(`[orchestrator] allowed roots: ${ALLOWED_ROOTS.join(", ")}`);
+  if (!isLoopbackHost(HOST)) {
+    console.warn(`[orchestrator] WARNING: HOST=${HOST} is not loopback — the port is open to other machines (requests whose Host isn't localhost are still refused).`);
+  }
 });
