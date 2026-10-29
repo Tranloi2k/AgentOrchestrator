@@ -219,6 +219,26 @@ function SpawnSummary({ tasks }) {
   );
 }
 
+/** A Team run's usage against its limits (server: teamLimitSummary). Hidden for other runs. */
+function TeamLimitsSummary({ usage }) {
+  const { t } = usePreferences();
+  if (!usage) return null;
+  const full = usage.delegations >= usage.maxDelegations || (usage.runTokenBudget > 0 && usage.tokens >= usage.runTokenBudget);
+  return (
+    <div className="run-spawn-summary">
+      👥{" "}
+      {t("run.teamLimits.summary", {
+        count: usage.delegations,
+        max: usage.maxDelegations,
+        tokens: usage.tokens.toLocaleString(),
+        budget: usage.runTokenBudget ? usage.runTokenBudget.toLocaleString() : "∞",
+        minutes: usage.callTimeoutMinutes,
+      })}
+      {full && <span className="run-quota-warn"> · {t("run.teamLimits.reached")}</span>}
+    </div>
+  );
+}
+
 /** A resumed run re-runs some nodes, so one nodeId can have several tasks across attempts.
  * The canvas should reflect the latest attempt, not the first one still sitting in history. */
 function latestTaskForNode(tasks, nodeId, kind) {
@@ -949,6 +969,7 @@ export default function RunTab({ view = "history" }) {
                   followTasksRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
                 }}
               >
+                <TeamLimitsSummary usage={selectedRun.teamLimits} />
                 <SpawnSummary tasks={selectedRun.tasks} />
                 {selectedRun.tasks.map((task) => (
                   <TaskCard
@@ -1033,7 +1054,6 @@ export default function RunTab({ view = "history" }) {
 
       {browsing && (
         <DirBrowserModal
-          startPath={cwd || defaultCwd}
           onSelect={(p) => {
             setCwd(p);
             setBrowsing(false);

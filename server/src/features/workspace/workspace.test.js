@@ -7,6 +7,8 @@ import { execFileSync } from "node:child_process";
 import {
   openWorkspaceSession,
   createWorktree,
+  reopenWorktree,
+  parkWorktree,
   integrateWorktree,
   finalizeWorkspaceReview,
   acceptWorkspaceReview,
@@ -204,5 +206,40 @@ test("gitignored dependencies are reachable from the worktree", async (t) => {
   await integrateWorktree(session, worktree, { title: "node", agentFailed: false, log: () => {} });
   const review = await finalizeWorkspaceReview(session, () => {});
   assert.deepEqual(review.files.map((f) => f.path), ["tracked.txt"]);
+  await declineWorkspaceReview(review);
+});
+
+test("a team coordinator's worktree survives a crash or a stop and is reopened on resume", async (t) => {
+  const repo = makeRepo();
+  const runId = "reopen-test";
+  t.after(() => rmSync(path.join(path.dirname(repo), ".ao-worktrees", runId), { recursive: true, force: true }));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  const { session } = await openWorkspaceSession({ cwd: repo, runId, isolation: {}, log: () => {} });
+
+  // First attempt: a member writes into the coordinator's folder, then the server dies.
+  const first = await reopenWorktree(session, "coordinator", () => {});
+  writeFileSync(path.join(first.dir, "member-1.txt"), "done by a member\n", "utf8");
+
+  // Resume after the crash: same folder, the member's file is still there and now committed.
+  const second = await reopenWorktree(session, "coordinator", () => {});
+  assert.equal(second.dir, first.dir, "same folder, so the coordinator's Claude session can be resumed");
+  assert.equal(readFileSync(path.join(second.dir, "member-1.txt"), "utf8"), "done by a member\n");
+  assert.equal(git(second.dir, "status", "--porcelain"), "");
+
+  // Second attempt is stopped: the worktree is parked, and even with its folder gone a resume
+  // checks the work out again from the branch.
+  writeFileSync(path.join(second.dir, "member-2.txt"), "also done\n", "utf8");
+  assert.equal(await parkWorktree(session, second, () => {}), true);
+  git(repo, "worktree", "remove", "--force", second.dir);
+  const third = await reopenWorktree(session, "coordinator", () => {});
+  assert.ok(existsSync(path.join(third.dir, "member-1.txt")));
+  assert.ok(existsSync(path.join(third.dir, "member-2.txt")));
+
+  // Nothing reached the base branch along the way.
+  assert.ok(!existsSync(path.join(repo, "member-1.txt")));
+  const integrated = await integrateWorktree(session, third, { title: "coordinator", agentFailed: false, log: () => {} });
+  assert.equal(integrated.ok, true);
+  const review = await finalizeWorkspaceReview(session, () => {});
+  assert.deepEqual(review.files.map((f) => f.path).sort(), ["member-1.txt", "member-2.txt"]);
   await declineWorkspaceReview(review);
 });

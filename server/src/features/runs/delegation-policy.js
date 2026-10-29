@@ -115,4 +115,54 @@ function classifyAgentFailure({ providerAvailable = true, spawnError = null, exi
   return "agent_error";
 }
 
-export { FAILOVER_REASONS, classifyAgentFailure, finishDelegation, questionFingerprint, reserveDelegation };
+const UNIT_MS = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1000 };
+const unitMs = (unit) => {
+  const u = unit.toLowerCase();
+  if (u.startsWith("d")) return UNIT_MS.d;
+  if (u.startsWith("h")) return UNIT_MS.h;
+  if (u.startsWith("m")) return UNIT_MS.m;
+  return UNIT_MS.s;
+};
+
+/**
+ * When a provider's quota comes back, read off its error text: an epoch after "limit reached|"
+ * (Claude Code), an ISO time, a duration ("try again in 2 days 3 hours", "retry in 41.5s",
+ * "retryDelay": "41s") or a clock time ("resets 3pm", "try again at 15:30"). A clock time with no
+ * date is the next time it comes round, in the server's local zone. Returns ms since the epoch,
+ * or null when nothing in the text says.
+ */
+function parseQuotaReset(text, now = Date.now()) {
+  const s = String(text || "");
+  let m = s.match(/limit reached\|(\d{10,13})\b/i);
+  if (m) return m[1].length === 13 ? Number(m[1]) : Number(m[1]) * 1000;
+
+  m = s.match(/(?:reset|retry|try again)[^\n]{0,40}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)/i);
+  if (m && !Number.isNaN(Date.parse(m[1]))) return Date.parse(m[1]);
+
+  m = s.match(/retryDelay"?\s*:\s*"?(\d+(?:\.\d+)?)s/i);
+  if (m) return now + Math.round(Number(m[1]) * 1000);
+
+  const part = String.raw`\d+(?:\.\d+)?\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])`;
+  m = s.match(new RegExp(String.raw`(?:try again|retry|resets?)\s+(?:in|after)\s+((?:${part}[\s,]*(?:and\s+)?)+)`, "i"));
+  if (m) {
+    let ms = 0;
+    for (const p of m[1].matchAll(/(\d+(?:\.\d+)?)\s*([a-z]+)/gi)) ms += Number(p[1]) * unitMs(p[2]);
+    if (ms > 0) return now + Math.round(ms);
+  }
+
+  m = s.match(/(?:resets?|try again)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?![\w:])/i);
+  if (m && (m[2] || m[3])) {
+    let hour = Number(m[1]) % 24;
+    const minute = Number(m[2] || 0);
+    if (m[3]) hour = (hour % 12) + (m[3].toLowerCase() === "pm" ? 12 : 0);
+    if (minute < 60) {
+      const at = new Date(now);
+      at.setHours(hour, minute, 0, 0);
+      if (at.getTime() <= now) at.setDate(at.getDate() + 1);
+      return at.getTime();
+    }
+  }
+  return null;
+}
+
+export { FAILOVER_REASONS, classifyAgentFailure, finishDelegation, parseQuotaReset, questionFingerprint, reserveDelegation };

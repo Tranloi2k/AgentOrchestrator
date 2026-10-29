@@ -9,6 +9,7 @@ import { nanoid } from "nanoid";
 import { acceptWorkspaceReview, declineWorkspaceReview } from "../workspace/workspace.js";
 import { shouldRenderLogLine } from "../../core/log-utils.js";
 import { SERVER_DIR, PROVIDERS, loadJson } from "../../core/config.js";
+import { teamLimitSummary } from "./team-calls.js";
 
 const RUNS_FILE = path.join(SERVER_DIR, "runs.json");
 
@@ -152,6 +153,8 @@ function summarize(run, { includeReviewPatch = false } = {}) {
     lastActivityAt: run.lastActivityAt || run.createdAt,
     stopping: run.status === "running" && isCancelling(run.id),
     resumable: canResume(run),
+    // A Team run's usage against its limits (delegations, tokens), for the Run tab.
+    teamLimits: teamLimitSummary(run),
     review,
     tasks: run.tasks.map((t) => ({
       id: t.id,

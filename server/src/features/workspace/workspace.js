@@ -396,8 +396,98 @@ async function createWorktree(session, nodeId, log) {
   return { branch, dir, nodeId };
 }
 
-/** Stages and commits everything the agent touched. `hasChanges:false` means the agent didn't
- * write anything — nothing to test, nothing to merge, worktree can just go away. */
+/**
+ * A Team coordinator's worktree, picked back up when its run is resumed. Members write into the
+ * coordinator's folder, so this is where the work items they already finished live; a resumed
+ * coordinator is told those items are done, and has to find their files. So when the node's
+ * branch from the earlier attempt still exists, it is reused: the folder as it is (a crash leaves
+ * it there), or checked out again from the branch (a stop parks it there, see parkWorktree).
+ * Anything left uncommitted is committed first, so a later reset can't drop it.
+ * Without an earlier branch this is createWorktree. Returns null when the old branch can't be
+ * opened: the caller stops rather than silently starting from scratch.
+ */
+async function reopenWorktree(session, nodeId, log) {
+  const branch = `ao/${session.runId}/${nodeId}`;
+  const dir = path.join(session.rootDir, "nodes", nodeId);
+  if (!(await branchExists(session.repoRoot, branch))) return createWorktree(session, nodeId, log);
+  return reuseBranchWorktree(session, { branch, dir, nodeId }, log);
+}
+
+/**
+ * The worktree of one Team work item (see team-calls.js): its own branch, forked from `fromBranch`
+ * (the coordinator's branch) on the item's first call and reused, folder and all, for its fix
+ * rounds and after a resume. `key` must be safe in a path and a branch name.
+ */
+async function openItemWorktree(session, key, fromBranch, log) {
+  const branch = `ao/${session.runId}/wi-${key}`;
+  const dir = path.join(session.rootDir, "items", key);
+  if (await branchExists(session.repoRoot, branch)) return reuseBranchWorktree(session, { branch, dir, nodeId: `wi-${key}` }, log);
+  try {
+    mkdirSync(path.dirname(dir), { recursive: true });
+  } catch {
+    /* `git worktree add` will report the real problem below */
+  }
+  if (existsSync(dir)) {
+    await git(["worktree", "remove", "--force", dir], session.repoRoot);
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+  const res = await git(["worktree", "add", "-b", branch, dir, fromBranch], session.repoRoot);
+  if (!res.ok) {
+    log(`⚠️ Không tạo được worktree cho công việc này (${res.output || "git worktree add thất bại"}).`);
+    return null;
+  }
+  await linkIgnoredArtifacts(session.repoRoot, dir, log);
+  log(`🌱 Không gian làm việc riêng của công việc: ${dir}\n   nhánh: ${branch} (tách từ ${fromBranch})`);
+  return { branch, dir, nodeId: `wi-${key}` };
+}
+
+/** Opens an existing branch's worktree again: the folder as it is, or checked out afresh. */
+async function reuseBranchWorktree(session, { branch, dir, nodeId }, log) {
+  let reusable = false;
+  if (existsSync(path.join(dir, ".git"))) {
+    const head = await git(["rev-parse", "--abbrev-ref", "HEAD"], dir);
+    reusable = head.ok && head.output.trim() === branch;
+  }
+  if (!reusable) {
+    await git(["worktree", "remove", "--force", dir], session.repoRoot);
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* git reports a useful error below */
+    }
+    await git(["worktree", "prune"], session.repoRoot);
+    const res = await git(["worktree", "add", dir, branch], session.repoRoot);
+    if (!res.ok) {
+      log(`❌ Không mở lại được không gian làm việc của lần chạy trước (${res.output || "git worktree add thất bại"}).`);
+      return null;
+    }
+    await linkIgnoredArtifacts(session.repoRoot, dir, log);
+  }
+  const wt = { branch, dir, nodeId };
+  await commitWorktree(session, wt, "orchestrator: giữ lại công việc của lần chạy bị gián đoạn", log);
+  log(`♻️ Dùng lại không gian làm việc của lần chạy trước: ${dir} (nhánh ${branch}); công việc đã xong vẫn còn.`);
+  return wt;
+}
+
+/**
+ * Keeps a stopped or failed Team coordinator's worktree for a resume instead of discarding it:
+ * its changes are committed on its own branch, and the folder and branch stay (reopenWorktree
+ * picks them up). Nothing is tested or merged into the review.
+ */
+async function parkWorktree(session, wt, log) {
+  const committed = await commitWorktree(session, wt, `orchestrator: ${wt.nodeId} (tạm dừng, chờ chạy tiếp)`, log);
+  if (!committed.ok) {
+    log(`⚠️ Không commit được không gian làm việc để chạy tiếp: ${committed.output || "lỗi git"}. Thư mục vẫn được giữ: ${wt.dir}`);
+    return false;
+  }
+  log(`⏸️ Giữ lại không gian làm việc và nhánh ${wt.branch} để "Chạy tiếp" dùng lại công việc đã xong (chưa gộp vào review).`);
+  return true;
+}
+
 /**
  * Puts a node's worktree back to where it started (its branch's last commit), dropping a failed
  * attempt's edits so a retry starts clean. Ignored files — the linked node_modules etc. — stay.
@@ -409,6 +499,8 @@ async function resetWorktree(wt, log) {
   else log("🧹 Đã dọn thay đổi của lần thử trước.");
 }
 
+/** Stages and commits everything the agent touched. `hasChanges:false` means the agent didn't
+ * write anything — nothing to test, nothing to merge, worktree can just go away. */
 async function commitWorktree(session, wt, message, log) {
   const status = await git(["status", "--porcelain"], wt.dir);
   if (!status.output) {
@@ -428,6 +520,15 @@ async function commitWorktree(session, wt, message, log) {
   return { ok: true, hasChanges: true };
 }
 
+/** Where a worktree is merged by default: the run's review worktree. */
+const reviewTarget = (session) => ({ dir: session.reviewDir, branch: session.reviewBranch, label: "workspace review" });
+
+/** True when the worktree's branch has commits the target branch (the review by default) doesn't. */
+async function hasUnmergedCommits(session, wt, targetBranch = session.reviewBranch) {
+  const res = await git(["rev-list", "--count", `${targetBranch}..${wt.branch}`], session.repoRoot);
+  return res.ok && Number(res.output.trim()) > 0;
+}
+
 /** Runs the workflow's test command inside the worktree. No command configured = auto-pass. */
 async function runTests(session, wt, log) {
   if (!session.testCommand) return { ok: true, skipped: true };
@@ -444,19 +545,19 @@ async function runTests(session, wt, log) {
 /** Merges the node's branch back into the base branch. Conflicts are aborted (leaving the base
  * branch exactly as it was) and reported — resolving them automatically would mean guessing
  * which parallel agent was right. */
-async function mergeBack(session, wt, log) {
+async function mergeBack(session, wt, log, target = reviewTarget(session)) {
   const res = await git(
     ["merge", "--no-ff", "--no-edit", "-m", `orchestrator: gộp ${wt.branch}`, wt.branch],
-    session.reviewDir
+    target.dir
   );
   if (res.ok) {
-    log(`✅ Đã gộp ${wt.branch} vào workspace review.`);
+    log(`✅ Đã gộp ${wt.branch} vào ${target.label}.`);
     return { ok: true };
   }
-  await git(["merge", "--abort"], session.reviewDir);
+  await git(["merge", "--abort"], target.dir);
   log(
-    `❌ Gộp nhánh ${wt.branch} vào workspace review bị xung đột — đã huỷ merge, nhánh ${session.baseBranch} vẫn giữ nguyên.\n${res.output}\n` +
-      `   Nhánh tạm vẫn còn: tự giải quyết bằng \`git merge ${wt.branch}\` trong ${session.reviewDir}.`
+    `❌ Gộp nhánh ${wt.branch} vào ${target.label} bị xung đột — đã huỷ merge, nhánh ${session.baseBranch} vẫn giữ nguyên.\n${res.output}\n` +
+      `   Nhánh tạm vẫn còn: tự giải quyết bằng \`git merge ${wt.branch}\` trong ${target.dir}.`
   );
   return { ok: false };
 }
@@ -490,33 +591,36 @@ async function cleanupWorktree(session, wt, { keep, log }) {
  * Callers MUST await these one at a time: `git merge` takes the repo's index lock, and two
  * concurrent merges into the same base branch would either fail on the lock or interleave.
  */
-async function integrateWorktree(session, wt, { title, agentFailed, log }) {
+async function integrateWorktree(session, wt, { title, agentFailed, log, into = null }) {
+  const target = into || reviewTarget(session);
   if (agentFailed) {
     await cleanupWorktree(session, wt, { keep: session.keepOnFailure, log });
-    return { ok: false };
+    return { ok: false, reason: "agent_failed" };
   }
 
   const committed = await commitWorktree(session, wt, `orchestrator: ${title}`.slice(0, 200), log);
   if (!committed.ok) {
     log(`❌ Không commit được thay đổi trong không gian riêng: ${committed.output || "lỗi git"}`);
     await cleanupWorktree(session, wt, { keep: session.keepOnFailure, log });
-    return { ok: false };
+    return { ok: false, reason: "commit_failed" };
   }
-  if (!committed.hasChanges) {
+  // Nothing new to commit can still mean work to merge: a reopened Team coordinator's branch
+  // already carries the commits of its interrupted attempts (see reopenWorktree).
+  if (!committed.hasChanges && !(await hasUnmergedCommits(session, wt, target.branch))) {
     await cleanupWorktree(session, wt, { keep: false, log });
-    return { ok: true };
+    return { ok: true, reason: "no_changes" };
   }
 
   const tested = await runTests(session, wt, log);
   if (!tested.ok) {
     log("❌ Kiểm thử thất bại — KHÔNG gộp nhánh này vào nhánh chính.");
     await cleanupWorktree(session, wt, { keep: session.keepOnFailure, log });
-    return { ok: false };
+    return { ok: false, reason: "tests_failed" };
   }
 
-  const merged = await mergeBack(session, wt, log);
+  const merged = await mergeBack(session, wt, log, target);
   await cleanupWorktree(session, wt, { keep: merged.ok ? false : session.keepOnFailure, log });
-  return { ok: merged.ok };
+  return { ok: merged.ok, reason: merged.ok ? "merged" : "conflict" };
 }
 
 /** Last-resort sweep at the end of a run: anything still registered under this run's worktree
@@ -676,6 +780,9 @@ export {
   prepareTargetBranch,
   openWorkspaceSession,
   createWorktree,
+  reopenWorktree,
+  openItemWorktree,
+  parkWorktree,
   integrateWorktree,
   closeWorkspaceSession,
   finalizeWorkspaceReview,

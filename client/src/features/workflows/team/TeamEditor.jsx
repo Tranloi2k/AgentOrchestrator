@@ -4,6 +4,12 @@ import TeamDiagram from "./TeamDiagram.jsx";
 import { usePreferences } from "../../../app/PreferencesContext.jsx";
 import { Button, Select, Textarea, TextInput, HelperText } from "../../../shared/components/index.js";
 import SpawnPolicyFields from "./SpawnPolicyFields.jsx";
+import MemberAgentList from "./MemberAgentList.jsx";
+
+/** A member's agents in order; a team saved with a single agentId reads as a one-item list. */
+export function memberAgentIds(member) {
+  return member.agentIds || (member.agentId ? [member.agentId] : []);
+}
 
 /**
  * Team workflow editor: a hub diagram on the left (coordinator on top, members hanging below it,
@@ -23,7 +29,7 @@ export default function TeamEditor({ team, agents, onChange }) {
   const updateMember = (index, patch) => update({ members: team.members.map((m, i) => (i === index ? { ...m, ...patch } : m)) });
 
   function addMember() {
-    update({ members: [...team.members, { alias: "", agentId: agents[0]?.id || "", role: "" }] });
+    update({ members: [...team.members, { alias: "", agentIds: agents[0] ? [agents[0].id] : [], role: "" }] });
     setSelected(team.members.length);
   }
 
@@ -37,7 +43,7 @@ export default function TeamEditor({ team, agents, onChange }) {
   const diagram = (
     <TeamDiagram
       coordinator={{ agentId: team.coordinator.agentId }}
-      members={team.members.map((m, i) => ({ key: i, ...m }))}
+      members={team.members.map((m, i) => ({ key: i, ...m, agentId: memberAgentIds(m)[0] }))}
       spawn={team.spawnPolicy}
       agents={agents}
       selected={selected}
@@ -78,13 +84,7 @@ export default function TeamEditor({ team, agents, onChange }) {
           onChange={(e) => updateMember(selected, { alias: e.target.value.toLowerCase().replace(/\s+/g, "-") })}
         />
         <HelperText>{t("workflows.team.aliasHint")}</HelperText>
-        <Select
-          label={t("workflows.agent")}
-          value={member.agentId}
-          placeholder={t("workflows.selectAgent")}
-          onChange={(e) => updateMember(selected, { agentId: e.target.value })}
-          options={agentOptions}
-        />
+        <MemberAgentList agentIds={memberAgentIds(member)} agents={agents} onChange={(agentIds) => updateMember(selected, { agentIds })} />
         <Textarea
           label={t("workflows.team.role")}
           value={member.role}

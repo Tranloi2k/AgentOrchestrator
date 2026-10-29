@@ -11,7 +11,7 @@ import { tmpdir, homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import spawn from "cross-spawn";
 import treeKill from "tree-kill";
-import { classifyAgentFailure } from "./delegation-policy.js";
+import { classifyAgentFailure, parseQuotaReset } from "./delegation-policy.js";
 import { HOST, INTERNAL_TOKEN, isLoopbackHost } from "../../core/security.js";
 import { BRIDGE_SCRIPT, MAX_CALL_DEPTH, KNOWN_TOOLS, SUBAGENT_TOOL, SUBAGENT_SYSTEM_PROMPT, PROVIDER_AVAILABILITY, AGY_BIN } from "../../core/config.js";
 import { toolCeiling, claudeToolAccess } from "../agents/access.js";
@@ -77,6 +77,11 @@ function killTree(pid, { graceMs = 5000 } = {}) {
  * nodes) is fine — the run's own loop notices the stop flag on its next iteration. */
 function killRunProcesses(runId) {
   for (const child of [...(liveChildren.get(runId) || [])]) killTree(child.pid);
+}
+
+/** Kills every process one task currently owns (an ask_agent call that ran out of time). */
+function killTaskProcesses(taskId) {
+  for (const child of [...(liveTaskChildren.get(taskId) || [])]) killTree(child.pid);
 }
 
 /** Combine agent's private instructions (its own appendSystemPrompt) with the content
@@ -145,13 +150,17 @@ function buildAgentBridgeContext(agent, node, workflow, { runId, taskId, cwd, de
             id: n.id,
             name: n.alias ? getAgent(n.agentId)?.name || n.agentId : nodeTitle(n),
             description: n.role || getAgent(n.agentId)?.description || "",
+            // A team member's backups are the server's choice; the bridge words the tool accordingly.
+            ...(n.teamRole === "member" ? { member: true } : {}),
           }))
       : [];
   const spawnPolicy = agent?.spawnPolicy?.enabled ? agent.spawnPolicy : null;
   if (!callable.length && !spawnPolicy) return null;
 
   const sessionId = randomBytes(16).toString("hex");
-  bridgeSessions.set(sessionId, { runId, taskId, agent, depth, cwd });
+  bridgeSessions.set(sessionId, { runId, taskId, agent, depth, cwd, nodeId: node?.id || null });
+  // A Team coordinator with isolation on merges its members' work items itself (complete_work_item).
+  const workItems = node?.teamRole === "coordinator" && !!workflow?.isolation?.enabled && callable.length > 0;
 
   return {
     AGENT_BRIDGE_URL: `http://${bridgeHost()}:${process.env.PORT || 5175}`,
@@ -164,6 +173,7 @@ function buildAgentBridgeContext(agent, node, workflow, { runId, taskId, cwd, de
     AGENT_BRIDGE_DEPTH: String(depth),
     AGENT_BRIDGE_CWD: cwd || "",
     AGENT_BRIDGE_CALLABLE: JSON.stringify(callable),
+    AGENT_BRIDGE_WORK_ITEMS: workItems ? "1" : "",
     // Shown to the model in the tool description only; the server enforces the real policy,
     // including the ceiling this supervisor puts on what it spawns (its own level and tools).
     AGENT_BRIDGE_SPAWN_POLICY: spawnPolicy
@@ -177,6 +187,7 @@ function bridgeToolNames(env) {
   const names = [];
   if (env.AGENT_BRIDGE_CALLABLE !== "[]") names.push("mcp__agent-bridge__ask_agent");
   if (env.AGENT_BRIDGE_SPAWN_POLICY) names.push("mcp__agent-bridge__spawn_agent");
+  if (env.AGENT_BRIDGE_WORK_ITEMS) names.push("mcp__agent-bridge__complete_work_item");
   return names;
 }
 
@@ -308,7 +319,7 @@ function runAgentProcess(opts) {
 }
 
 /** Runs a single `claude -p` process, streams stdout(JSONL) as events, resolves final text. */
-function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, extraArgs = [], depth = 0, resume = null }) {
+function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, extraArgs = [], depth = 0, resume = null, onSessionId = null }) {
   return new Promise((resolve) => {
     // --forward-subagent-text: when this agent uses Claude Code's own Task tool to spawn a
     // subagent, that subagent's text/thinking gets forwarded into this same stream-json output
@@ -379,6 +390,7 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
     let usage = null;
     let stderrText = "";
     let quotaSignal = false;
+    let quotaResetAt = null;
     let sessionId = null;
     const startedAt = Date.now();
 
@@ -393,7 +405,10 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
         if (!line) continue;
         try {
           const evt = JSON.parse(line);
-          if (evt.session_id) sessionId = evt.session_id;
+          if (evt.session_id && evt.session_id !== sessionId) {
+            sessionId = evt.session_id;
+            onSessionId?.(sessionId);
+          }
           if (evt.type === "assistant" && evt.message?.content) {
             for (const block of evt.message.content) {
               if (block.type === "text" && block.text) {
@@ -414,7 +429,10 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
           } else if (evt.type === "rate_limit_event" && evt.rate_limit_info) {
             const r = evt.rate_limit_info;
             setClaudeQuota(r);
-            quotaSignal ||= Number(r.utilization) >= 1;
+            if (Number(r.utilization) >= 1) {
+              quotaSignal = true;
+              if (Number(r.resetsAt)) quotaResetAt = Number(r.resetsAt) * 1000; // epoch seconds
+            }
             pushLog(`ℹ️ Quota Claude (${r.rateLimitType}): đã dùng ${Math.round((r.utilization || 0) * 100)}%`);
           }
         } catch {
@@ -442,12 +460,14 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
 
     child.on("close", (code) => {
       cleanup();
+      const failureReason = classifyAgentFailure({ exitCode: code, stderr: stderrText, resultText, quotaSignal });
       resolve({
         ok: code === 0,
         resultText,
         usage,
         sessionId,
-        failureReason: classifyAgentFailure({ exitCode: code, stderr: stderrText, resultText, quotaSignal }),
+        failureReason,
+        quotaResetAt: quotaResetFor(failureReason, `${stderrText}\n${resultText}`, quotaResetAt),
       });
     });
   });
@@ -605,11 +625,13 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent, node, workflow, de
         /* ignore */
       }
       if (resultText) pushLog(`✅ Kết quả cuối:\n${resultText}`);
+      const failureReason = classifyAgentFailure({ exitCode: code, stderr: stderrText, resultText });
       resolve({
         ok: code === 0,
         resultText,
         usage,
-        failureReason: classifyAgentFailure({ exitCode: code, stderr: stderrText, resultText }),
+        failureReason,
+        quotaResetAt: quotaResetFor(failureReason, `${stderrText}\n${resultText}`),
       });
     });
   });
@@ -762,7 +784,7 @@ const AGY_MODE_NOTES = {
  *    the Claude per-tool allowlist doesn't apply.
  *  - Skills / private system prompt are prepended to the prompt, as for codex.
  */
-function runAgyProcess({ runId, taskId, prompt, cwd, agent, node, workflow, depth = 0, resume = null }) {
+function runAgyProcess({ runId, taskId, prompt, cwd, agent, node, workflow, depth = 0, resume = null, onSessionId = null }) {
   return new Promise((resolve) => {
     const pushLog = (line) => pushTaskLog(runId, taskId, line);
     const systemPrompt = [AGY_MODE_NOTES[agent?.agyMode || "plan"], buildSystemPrompt(agent)].filter(Boolean).join("\n\n");
@@ -847,7 +869,11 @@ function runAgyProcess({ runId, taskId, prompt, cwd, agent, node, workflow, dept
           pushLog(line);
           continue;
         }
-        sessionId = evt.conversation_id || evt.step_update?.conversation_id || evt.result?.conversation_id || sessionId;
+        const seen = evt.conversation_id || evt.step_update?.conversation_id || evt.result?.conversation_id;
+        if (seen && seen !== sessionId) {
+          sessionId = seen;
+          onSessionId?.(sessionId);
+        }
         if (evt.event === "init") pushLog(`ℹ️ agy · ${evt.init?.model || "?"} · ${evt.init?.permission_mode || ""}`);
         else if (evt.event === "step_update" && evt.step_update) onStep(evt.step_update);
         else if (evt.event === "result") {
@@ -877,12 +903,15 @@ function runAgyProcess({ runId, taskId, prompt, cwd, agent, node, workflow, dept
       // A run whose only output was blocked by a permission denial is a failure, not an empty success.
       const blocked = !resultText && (result?.denied_actions || []).length > 0;
       const ok = code === 0 && result?.status === "SUCCESS" && !blocked;
+      const errorText = `${stderrText}\n${result?.error || ""}`;
+      const failureReason = ok ? null : classifyAgentFailure({ exitCode: code || 1, stderr: errorText, resultText });
       resolve({
         ok,
         resultText,
         usage: result?.usage ? normalizeAgyUsage(result, Date.now() - startedAt) : null,
         sessionId,
-        failureReason: ok ? null : classifyAgentFailure({ exitCode: code || 1, stderr: `${stderrText}\n${result?.error || ""}`, resultText }),
+        failureReason,
+        quotaResetAt: quotaResetFor(failureReason, `${errorText}\n${resultText}`),
       });
     });
   });
@@ -904,6 +933,12 @@ function normalizeAgyUsage(result, wallDurationMs) {
   };
 }
 
+/** When a quota failure says its quota comes back (ms since the epoch), else null. */
+function quotaResetFor(failureReason, text, known = null) {
+  if (failureReason !== "quota") return null;
+  return known || parseQuotaReset(text);
+}
+
 function summarizeInput(input) {
   if (!input) return "";
   try {
@@ -914,4 +949,4 @@ function summarizeInput(input) {
   }
 }
 
-export { runAgentProcess, killRunProcesses, getBridgeSession };
+export { runAgentProcess, killRunProcesses, killTaskProcesses, getBridgeSession };

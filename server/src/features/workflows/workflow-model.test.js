@@ -149,3 +149,41 @@ test("schedules: valid cron, a request, and every required input", () => {
   const bad = codes({ ...wf, schedules: [{ cron: "7am", prompt: "" }] });
   for (const c of ["scheduleCronInvalid", "scheduleNoPrompt", "scheduleMissingInput"]) assert.ok(bad.includes(c), c);
 });
+
+test("team: a member's single agentId is migrated to an ordered agentIds list", () => {
+  const wf = normalizeWorkflowInput({
+    type: "team",
+    team: { coordinator: { agentId: "a1" }, members: [{ alias: "fe", agentId: "a2", role: "x" }] },
+  });
+  assert.deepEqual(wf.team.members[0], { alias: "fe", agentIds: ["a2"], role: "x" });
+  const member = wf.nodes.find((n) => n.id === "fe");
+  assert.equal(member.agentId, "a2", "the node keeps its primary as agentId");
+  assert.deepEqual(member.agentIds, ["a2"]);
+
+  const listed = normalizeWorkflowInput({
+    type: "team",
+    team: { coordinator: { agentId: "a1" }, members: [{ alias: "fe", agentIds: ["a3", "a2"], role: "x" }] },
+  });
+  assert.deepEqual(listed.nodes.find((n) => n.id === "fe").agentIds, ["a3", "a2"]);
+  assert.equal(listed.nodes.find((n) => n.id === "fe").agentId, "a3");
+});
+
+test("team: a member's agent list must be non-empty, known and without duplicates", () => {
+  const team = (agentIds) => ({ type: "team", team: { coordinator: { agentId: "a1" }, members: [{ alias: "fe", agentIds, role: "x" }] } });
+  assert.deepEqual(codes(team(["a2", "a3"])), []);
+  assert.ok(codes(team([])).includes("memberNoAgent"));
+  assert.ok(codes(team(["a2", "nope"])).includes("unknownAgent"));
+  assert.ok(codes(team(["a2", "a2"])).includes("memberAgentDuplicate"));
+});
+
+test("team limits: safe defaults for teams saved without them, carried on the coordinator node", () => {
+  const wf = normalizeWorkflowInput({ type: "team", team: { coordinator: { agentId: "a1" }, members: [{ alias: "fe", agentId: "a2", role: "x" }] } });
+  assert.deepEqual(wf.team.limits, { maxDelegations: 30, callTimeoutMinutes: 30, runTokenBudget: 2_000_000 });
+  assert.deepEqual(wf.nodes.find((n) => n.id === COORDINATOR_NODE_ID).teamLimits, wf.team.limits);
+
+  const custom = normalizeWorkflowInput({
+    type: "team",
+    team: { coordinator: { agentId: "a1" }, members: [], limits: { maxDelegations: "5", callTimeoutMinutes: 0, runTokenBudget: 0 } },
+  });
+  assert.deepEqual(custom.team.limits, { maxDelegations: 5, callTimeoutMinutes: 1, runTokenBudget: 0 }, "0 tokens = no limit; a timeout is at least a minute");
+});

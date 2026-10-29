@@ -117,17 +117,23 @@
       "members": [
         {
           "alias": "engineer",
-          "agentId": "rxEng001",
+          "agentIds": [
+            "rxEng001"
+          ],
           "role": "Main React engineer. Implements work items from a brief and reports changed files plus typecheck/lint/test results."
         },
         {
           "alias": "engineer-agy",
-          "agentId": "rxEng001",
+          "agentIds": [
+            "rxEng001"
+          ],
           "role": "Backup React engineer . Can edit code but cannot run shell commands, so it reports verification as not run; reviewer runs the checks."
         },
         {
           "alias": "reviewer",
-          "agentId": "rxReview",
+          "agentIds": [
+            "rxReview"
+          ],
           "role": "Reviews one work item: runs checks, compares with the brief, answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED. Never edits files."
         }
       ],
@@ -144,6 +150,11 @@
         "geminiModels": [],
         "maxAgents": 3,
         "tokenBudget": 300000
+      },
+      "limits": {
+        "maxDelegations": 30,
+        "callTimeoutMinutes": 30,
+        "runTokenBudget": 2000000
       }
     },
     "nodes": [
@@ -172,11 +183,19 @@
           "geminiModels": [],
           "maxAgents": 3,
           "tokenBudget": 300000
+        },
+        "teamLimits": {
+          "maxDelegations": 30,
+          "callTimeoutMinutes": 30,
+          "runTokenBudget": 2000000
         }
       },
       {
         "id": "engineer",
         "agentId": "rxEng001",
+        "agentIds": [
+          "rxEng001"
+        ],
         "promptTemplate": "",
         "kind": "agent",
         "teamRole": "member",
@@ -188,6 +207,9 @@
       {
         "id": "engineer-agy",
         "agentId": "rxEng001",
+        "agentIds": [
+          "rxEng001"
+        ],
         "promptTemplate": "",
         "kind": "agent",
         "teamRole": "member",
@@ -199,6 +221,9 @@
       {
         "id": "reviewer",
         "agentId": "rxReview",
+        "agentIds": [
+          "rxReview"
+        ],
         "promptTemplate": "",
         "kind": "agent",
         "teamRole": "member",
@@ -234,17 +259,23 @@
       "members": [
         {
           "alias": "researcher",
-          "agentId": "ytRsrch1",
+          "agentIds": [
+            "ytRsrch1"
+          ],
           "role": "Finds hot AI/no-code topics (topic scouting) and builds sourced fact packs for a chosen topic. Read-only, uses the web."
         },
         {
           "alias": "writer",
-          "agentId": "ytWritr1",
+          "agentIds": [
+            "ytWritr1"
+          ],
           "role": "Writes Shorts or long-form scripts from a brief and fact pack, following the channel handbooks; saves the final version to scripts/."
         },
         {
           "alias": "editor",
-          "agentId": "ytEditr1",
+          "agentIds": [
+            "ytEditr1"
+          ],
           "role": "Checks a script against the handbook and the fact pack, spot-checks sources, answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED."
         }
       ],
@@ -256,6 +287,11 @@
         "geminiModels": [],
         "maxAgents": 3,
         "tokenBudget": 300000
+      },
+      "limits": {
+        "maxDelegations": 30,
+        "callTimeoutMinutes": 30,
+        "runTokenBudget": 2000000
       }
     },
     "nodes": [
@@ -279,11 +315,19 @@
           "geminiModels": [],
           "maxAgents": 3,
           "tokenBudget": 300000
+        },
+        "teamLimits": {
+          "maxDelegations": 30,
+          "callTimeoutMinutes": 30,
+          "runTokenBudget": 2000000
         }
       },
       {
         "id": "researcher",
         "agentId": "ytRsrch1",
+        "agentIds": [
+          "ytRsrch1"
+        ],
         "promptTemplate": "",
         "kind": "agent",
         "teamRole": "member",
@@ -295,6 +339,9 @@
       {
         "id": "writer",
         "agentId": "ytWritr1",
+        "agentIds": [
+          "ytWritr1"
+        ],
         "promptTemplate": "",
         "kind": "agent",
         "teamRole": "member",
@@ -306,6 +353,9 @@
       {
         "id": "editor",
         "agentId": "ytEditr1",
+        "agentIds": [
+          "ytEditr1"
+        ],
         "promptTemplate": "",
         "kind": "agent",
         "teamRole": "member",

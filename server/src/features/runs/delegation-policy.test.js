@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyAgentFailure, finishDelegation, reserveDelegation } from "./delegation-policy.js";
+import { classifyAgentFailure, finishDelegation, parseQuotaReset, reserveDelegation } from "./delegation-policy.js";
 
 const base = (overrides = {}) => ({
   callerNodeId: "pm",
@@ -77,4 +77,18 @@ test("failure classifier only unlocks failover for quota or unavailable provider
   assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "Memory limit exceeded" }), "agent_error");
   assert.equal(classifyAgentFailure({ providerAvailable: false }), "provider_unavailable");
   assert.equal(classifyAgentFailure({ exitCode: 0 }), null);
+});
+
+test("quota reset times are read off the providers' error text", () => {
+  const now = new Date(2026, 9, 29, 10, 0, 0).getTime(); // 10:00 local
+  assert.equal(parseQuotaReset("Claude AI usage limit reached|1761760800", now), 1761760800 * 1000);
+  assert.equal(parseQuotaReset("Rate limited. Resets at 2026-10-29T15:00:00Z", now), Date.parse("2026-10-29T15:00:00Z"));
+  assert.equal(parseQuotaReset("You've hit your usage limit. Try again in 2 days 3 hours.", now), now + (2 * 24 + 3) * 3600_000);
+  assert.equal(parseQuotaReset("RESOURCE_EXHAUSTED. Please retry in 41.5s", now), now + 41_500);
+  assert.equal(parseQuotaReset('{"retryDelay": "30s"}', now), now + 30_000);
+  assert.equal(parseQuotaReset("limit resets in 1h20m", now), now + 80 * 60_000);
+  assert.equal(parseQuotaReset("5-hour limit reached, resets 3pm (Europe/Paris)", now), new Date(2026, 9, 29, 15, 0).getTime());
+  assert.equal(parseQuotaReset("try again at 9:30", now), new Date(2026, 9, 30, 9, 30).getTime(), "a time already past today means tomorrow");
+  assert.equal(parseQuotaReset("usage limit reached", now), null);
+  assert.equal(parseQuotaReset("resets in a while", now), null);
 });

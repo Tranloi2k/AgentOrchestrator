@@ -102,6 +102,35 @@ function normalizeIsolationInput(input) {
   };
 }
 
+export const MAX_MEMBER_AGENTS = 6;
+
+/**
+ * A member's agents in the order the server tries them: the first is the primary, the rest take
+ * over when it is out of quota or its CLI is missing (see team-calls.js). Teams saved with a
+ * single `agentId` become a one-item list. Duplicates are kept here so validation can report them.
+ */
+function memberAgentIds(m) {
+  const list = Array.isArray(m.agentIds) ? m.agentIds : m.agentId ? [m.agentId] : [];
+  return list.map((id) => String(id || "")).filter(Boolean).slice(0, MAX_MEMBER_AGENTS);
+}
+
+/**
+ * Limits for a whole Team run, enforced by the server on its members (team-calls.js):
+ *  - maxDelegations:     ask_agent calls per run (a call answered from an earlier attempt doesn't count)
+ *  - callTimeoutMinutes: wall-clock time one ask_agent call may take, failover included
+ *  - runTokenBudget:     tokens (input + output + cache writes) for the whole run, coordinator,
+ *                        members and spawned agents together; 0 = no limit
+ */
+export const DEFAULT_TEAM_LIMITS = { maxDelegations: 30, callTimeoutMinutes: 30, runTokenBudget: 2_000_000 };
+
+export function normalizeTeamLimits(input) {
+  return {
+    maxDelegations: intIn(input?.maxDelegations, 1, 1000, DEFAULT_TEAM_LIMITS.maxDelegations),
+    callTimeoutMinutes: intIn(input?.callTimeoutMinutes, 1, 24 * 60, DEFAULT_TEAM_LIMITS.callTimeoutMinutes),
+    runTokenBudget: intIn(input?.runTokenBudget, 0, 1e9, DEFAULT_TEAM_LIMITS.runTokenBudget),
+  };
+}
+
 export function normalizeTeam(input) {
   const team = input || {};
   return {
@@ -113,16 +142,19 @@ export function normalizeTeam(input) {
     },
     members: (Array.isArray(team.members) ? team.members : []).filter(Boolean).map((m) => ({
       alias: String(m.alias || "").trim().toLowerCase(),
-      agentId: String(m.agentId || ""),
+      agentIds: memberAgentIds(m),
       role: String(m.role || "").trim(),
     })),
     spawnPolicy: normalizeSpawnPolicy(team.spawnPolicy),
+    limits: normalizeTeamLimits(team.limits),
   };
 }
 
 /** The graph a team runs as. Members without an alias or agent are left out (validation reports them). */
 export function teamToGraph(team) {
-  const members = team.members.filter((m) => m.alias && m.agentId && m.alias !== COORDINATOR_NODE_ID);
+  const members = team.members
+    .filter((m) => m.alias && m.agentIds.length && m.alias !== COORDINATOR_NODE_ID)
+    .map((m) => ({ ...m, agentIds: [...new Set(m.agentIds)] }));
   return {
     nodes: [
       {
@@ -135,10 +167,14 @@ export function teamToGraph(team) {
         autoStart: true,
         // Overrides whatever spawn_agent setting the coordinator's agent has on its own.
         spawnPolicy: team.spawnPolicy,
+        // Carried on the node so a run's snapshot keeps the limits it started with.
+        teamLimits: team.limits,
       },
       ...members.map((m) => ({
         id: m.alias,
-        agentId: m.agentId,
+        // agentId is the primary, so everything that names a node by its agent keeps working.
+        agentId: m.agentIds[0],
+        agentIds: m.agentIds,
         promptTemplate: "",
         kind: "agent",
         teamRole: "member",
@@ -289,8 +325,9 @@ function validateTeam(team, agentExists, err) {
     else if (seen.has(alias)) err("memberAliasDuplicate", { alias });
     seen.add(alias);
     const who = alias || `#${i + 1}`;
-    if (!m.agentId) err("memberNoAgent", { alias: who });
-    else if (!agentExists(m.agentId)) err("unknownAgent", { node: who });
+    if (!m.agentIds.length) err("memberNoAgent", { alias: who });
+    if (m.agentIds.some((id) => !agentExists(id))) err("unknownAgent", { node: who });
+    if (new Set(m.agentIds).size !== m.agentIds.length) err("memberAgentDuplicate", { alias: who });
     if (!m.role) err("memberNoRole", { alias: who });
   });
 

@@ -99,7 +99,9 @@ function duplicateAgent(id) {
 }
 
 function deleteAgent(id) {
-  const usedByWorkflows = listWorkflows().filter((w) => w.nodes.some((n) => n.agentId === id)).map((w) => w.name);
+  const usedByWorkflows = listWorkflows()
+    .filter((w) => w.nodes.some((n) => n.agentId === id || n.agentIds?.includes(id)))
+    .map((w) => w.name);
   if (usedByWorkflows.length) {
     throw new Error(
       `Agent đang được dùng trong workflow: ${usedByWorkflows.join(", ")}. Gỡ khỏi (các) workflow đó trước rồi mới xoá.`

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../../shared/api.js";
 import WorkflowCanvas from "./WorkflowCanvas.jsx";
-import WorkflowRunSettings from "./WorkflowRunSettings.jsx";
+import WorkflowRunSettings, { DEFAULT_TEAM_LIMITS } from "./WorkflowRunSettings.jsx";
 import TeamEditor from "./team/TeamEditor.jsx";
 import { IconClose, IconCopy } from "../../shared/Icons.jsx";
 import { usePreferences } from "../../app/PreferencesContext.jsx";
@@ -23,6 +23,7 @@ const BLANK_TEAM = {
   coordinator: { agentId: "", process: "" },
   members: [],
   spawnPolicy: BLANK_SPAWN_POLICY,
+  limits: DEFAULT_TEAM_LIMITS,
 };
 
 const BLANK = {
@@ -284,7 +285,7 @@ export default function WorkflowDetailPage() {
         checked={!!isolation.enabled}
         onChange={(checked) => updateIsolation({ enabled: checked })}
         label={t("workflows.isolation.enabled")}
-        hint={isolation.enabled ? t("workflows.isolation.enabledHint") : ""}
+        hint={isolation.enabled ? t(form.type === "team" ? "workflows.isolation.enabledHint.team" : "workflows.isolation.enabledHint") : ""}
       />
       {isolation.enabled && (
         <>

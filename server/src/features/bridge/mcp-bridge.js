@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Agent-to-agent bridge — a tiny stdio MCP server spawned as a side-process of a running agent.
- * It exposes up to two tools, depending on what the server configured for this agent:
+ * It exposes these tools, depending on what the server configured for this agent (and, for a
+ * Team coordinator whose members work in their own worktrees, `complete_work_item`):
  *  - `ask_agent`: call another node's agent in the SAME workflow synchronously (send a question,
  *    block until the callee's full answer comes back, then keep going) — real two-way agent
  *    interaction, on top of the one-directional workflow-graph edges.
@@ -40,6 +41,8 @@ const parseJson = (value, fallback) => {
 };
 const CALLABLE = parseJson(process.env.AGENT_BRIDGE_CALLABLE, []);
 const SPAWN_POLICY = parseJson(process.env.AGENT_BRIDGE_SPAWN_POLICY, null);
+// A Team coordinator with isolation on: each work item a member writes has its own worktree.
+const WORK_ITEMS = process.env.AGENT_BRIDGE_WORK_ITEMS === "1";
 
 /**
  * POSTs JSON to the orchestrator server. Uses node:http rather than fetch on purpose: fetch
@@ -84,6 +87,12 @@ const server = new McpServer({ name: "agent-bridge", version: "1.0.0" });
 
 if (CALLABLE.length) {
   const callableList = CALLABLE.map((n) => `- id="${n.id}" tên="${n.name}" — ${n.description || ""}`).join("\n");
+  // Team members fail over to their own backup agents on the server. Pipeline nodes have one
+  // agent each, so there the caller may still move a work item after a quota/CLI failure.
+  const isMember = (id) => CALLABLE.some((n) => n.id === id && n.member);
+  const ownershipRule = CALLABLE.every((n) => n.member)
+    ? "Không được giao cùng workItemId cho agent khác. Khi một thành viên hết quota hoặc CLI không khả dụng, hệ thống tự chuyển sang agent dự phòng của chính thành viên đó; bạn không cần và không nên tự chọn agent dự phòng. "
+    : "Không được giao cùng workItemId cho agent khác, trừ khi lần trước được hệ thống xác nhận thất bại vì hết quota/provider không khả dụng. ";
 
   server.registerTool(
     "ask_agent",
@@ -91,9 +100,14 @@ if (CALLABLE.length) {
       title: "Hỏi một agent khác trong workflow",
       description:
         "Gọi trực tiếp một agent khác (1 bước khác) trong CÙNG workflow này, gửi câu hỏi/nhiệm vụ, và CHỜ nhận câu trả lời đầy đủ của nó rồi mới tiếp tục việc của bạn. " +
-        "Mỗi công việc logic chỉ được thuộc MỘT agent. Giữ nguyên workItemId khi yêu cầu cùng agent làm tiếp/sửa tiếp. " +
-        "Không được giao cùng workItemId cho agent khác, trừ khi lần trước được hệ thống xác nhận thất bại vì hết quota/provider không khả dụng. " +
+        "Mỗi công việc logic chỉ được thuộc MỘT agent. Giữ nguyên workItemId khi yêu cầu cùng agent làm tiếp/sửa tiếp; agent đó nhớ các lần trước của công việc này. " +
+        ownershipRule +
         "Nếu chia yêu cầu gốc thành công việc mới thật sự khác, dùng workItemId mới và khai báo parentWorkItemId.\n\n" +
+        (WORK_ITEMS
+          ? "Mỗi công việc mà thành viên được ghi file làm sẽ có một worktree git riêng, nên nhiều thành viên có thể làm song song mà không ghi đè nhau. " +
+            "Khi giao cho thành viên chỉ đọc (vd reviewer) review một công việc, truyền reviewOf = workItemId của công việc đó để nó đọc đúng thư mục; reviewer kết thúc bằng REVIEW: PASS hoặc REVIEW: FAIL. " +
+            "Khi một công việc đã xong và review đạt, gọi complete_work_item để kiểm thử và gộp nó; cuối run, công việc nào review đạt mà chưa gộp sẽ được gộp tự động.\n\n"
+          : "") +
         "Các agent bạn được phép hỏi:\n" +
         callableList,
       inputSchema: {
@@ -101,9 +115,12 @@ if (CALLABLE.length) {
         question: z.string().describe("Câu hỏi / nhiệm vụ cụ thể muốn agent đó thực hiện và trả lời"),
         workItemId: z.string().min(1).max(80).describe("Mã ổn định của một công việc logic, ví dụ feature-login-ui; không đổi mã để giao cùng việc cho agent khác"),
         parentWorkItemId: z.string().min(1).max(80).optional().describe("Bắt buộc khi đây là subtask mới được tách ra; dùng workItemId của việc cha, hoặc root nếu tách trực tiếp từ yêu cầu gốc"),
+        ...(WORK_ITEMS
+          ? { reviewOf: z.string().min(1).max(80).optional().describe("Chỉ cho thành viên chỉ đọc: workItemId của công việc cần review, để nó làm trong worktree của công việc đó") }
+          : {}),
       },
     },
-    async ({ agentId, question, workItemId, parentWorkItemId }) => {
+    async ({ agentId, question, workItemId, parentWorkItemId, reviewOf }) => {
       try {
         const { ok, status, data } = await postJson("/api/internal/ask-agent", {
           runId: RUN_ID,
@@ -114,18 +131,49 @@ if (CALLABLE.length) {
           question,
           workItemId,
           parentWorkItemId,
+          reviewOf,
           cwd: CWD,
           depth: DEPTH,
         });
         if (!ok) return text(`Lỗi: ${data.error || `HTTP ${status}`}`, true);
+        const by = data.agent ? `\n\n---\n(Thực hiện bởi agent ${data.agent.name} · ${data.agent.provider})` : "";
         if (!data.ok) {
-          const canFailOver = ["quota", "provider_unavailable"].includes(data.failureReason);
-          const guidance = canFailOver
-            ? ` Có thể gọi agent khác với CÙNG workItemId="${workItemId}" vì hệ thống đã mở khóa failover.`
-            : " Không được giao công việc này cho agent khác; hãy thử lại cùng agent hoặc báo lỗi cho người dùng.";
-          return text(`Agent không hoàn thành (${data.failureReason || "agent_error"}).${guidance}`, true);
+          const exhausted = ["quota", "provider_unavailable"].includes(data.failureReason);
+          const guidance = data.failureReason === "timeout"
+            ? " Lần giao việc này vượt giới hạn thời gian của Team và agent đã bị dừng. Chia việc nhỏ hơn rồi giao lại cùng workItemId, hoặc ghi nhận phần chưa xong trong báo cáo cuối."
+            : !exhausted
+            ? " Không được giao công việc này cho agent khác; hãy thử lại cùng agent hoặc báo lỗi cho người dùng."
+            : isMember(agentId)
+              ? " Hệ thống đã thử mọi agent của thành viên này và không agent nào chạy được lúc này. Ghi nhận phần việc chưa xong và báo lại cho người dùng."
+              : ` Có thể gọi agent khác với CÙNG workItemId="${workItemId}" vì hệ thống đã mở khóa failover.`;
+          return text(`Agent không hoàn thành (${data.failureReason || "agent_error"}).${guidance}${by}`, true);
         }
-        return text(data.answer || "(agent kia không trả lời gì)");
+        const notes = [data.review ? `Kết quả review: ${data.review === "passed" ? "ĐẠT" : "CHƯA ĐẠT"}` : "", data.note || ""].filter(Boolean);
+        return text((data.answer || "(agent kia không trả lời gì)") + by + (notes.length ? `\n${notes.map((n) => `(${n})`).join("\n")}` : ""));
+      } catch (err) {
+        return text(`Lỗi kết nối agent-bridge: ${err.message}`, true);
+      }
+    }
+  );
+}
+
+if (WORK_ITEMS) {
+  server.registerTool(
+    "complete_work_item",
+    {
+      title: "Gộp một công việc đã xong",
+      description:
+        "Báo một công việc (workItemId) đã xong: hệ thống chạy lệnh kiểm thử của workflow trong worktree của công việc đó rồi gộp vào nhánh của bạn. " +
+        "Chỉ gọi khi thành viên đã làm xong và review đạt. Nếu kiểm thử thất bại hoặc xung đột với việc đã gộp trước, công việc KHÔNG được gộp và bạn được báo lý do.",
+      inputSchema: {
+        workItemId: z.string().min(1).max(80).describe("workItemId của công việc cần gộp"),
+      },
+    },
+    async ({ workItemId }) => {
+      try {
+        const { ok, status, data } = await postJson("/api/internal/complete-work-item", { sessionId: SESSION_ID, workItemId });
+        if (!ok) return text(`Không gộp được: ${data.error || `HTTP ${status}`}`, true);
+        return text(data.message || (data.ok ? "Đã gộp." : "Không gộp được."), !data.ok);
       } catch (err) {
         return text(`Lỗi kết nối agent-bridge: ${err.message}`, true);
       }

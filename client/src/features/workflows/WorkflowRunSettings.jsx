@@ -7,6 +7,9 @@ import { Button, CheckboxField, HelperText, TextInput, Textarea } from "../../sh
 
 const fmt = (ms) => new Date(ms).toLocaleString();
 
+/** Same defaults as DEFAULT_TEAM_LIMITS in server/src/features/workflows/workflow-model.js. */
+export const DEFAULT_TEAM_LIMITS = { maxDelegations: 30, callTimeoutMinutes: 30, runTokenBudget: 2_000_000 };
+
 /** Live check of a cron expression: valid or not, and the next times it would fire. */
 function CronPreview({ cron }) {
   const { t } = usePreferences();
@@ -39,6 +42,9 @@ export default function WorkflowRunSettings({ form, setForm, workflowId }) {
   const limits = form.limits || { timeoutMin: 0, tokenBudget: 0 };
   const schedules = form.schedules || [];
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+  // A Team's own limits (server: normalizeTeamLimits); a team saved before them gets the defaults.
+  const teamLimits = { ...DEFAULT_TEAM_LIMITS, ...(form.team?.limits || {}) };
+  const setTeamLimits = (patch) => setForm((f) => ({ ...f, team: { ...f.team, limits: { ...DEFAULT_TEAM_LIMITS, ...(f.team?.limits || {}), ...patch } } }));
   const setInput = (i, patch) => set({ inputs: inputs.map((x, j) => (j === i ? { ...x, ...patch } : x)) });
   const setSchedule = (i, patch) => set({ schedules: schedules.map((x, j) => (j === i ? { ...x, ...patch } : x)) });
 
@@ -84,15 +90,46 @@ export default function WorkflowRunSettings({ form, setForm, workflowId }) {
             value={limits.timeoutMin}
             onChange={(e) => set({ limits: { ...limits, timeoutMin: Number(e.target.value) } })}
           />
-          <TextInput
-            type="number"
-            min={0}
-            step={10000}
-            label={t("workflows.limits.tokens")}
-            value={limits.tokenBudget}
-            onChange={(e) => set({ limits: { ...limits, tokenBudget: Number(e.target.value) } })}
-          />
+          {form.type !== "team" && (
+            <TextInput
+              type="number"
+              min={0}
+              step={10000}
+              label={t("workflows.limits.tokens")}
+              value={limits.tokenBudget}
+              onChange={(e) => set({ limits: { ...limits, tokenBudget: Number(e.target.value) } })}
+            />
+          )}
         </DetailFieldGrid>
+        {form.type === "team" && (
+          <>
+            <DetailFieldGrid>
+              <TextInput
+                type="number"
+                min={1}
+                label={t("workflows.teamLimits.maxDelegations")}
+                value={teamLimits.maxDelegations}
+                onChange={(e) => setTeamLimits({ maxDelegations: Number(e.target.value) })}
+              />
+              <TextInput
+                type="number"
+                min={1}
+                label={t("workflows.teamLimits.callTimeout")}
+                value={teamLimits.callTimeoutMinutes}
+                onChange={(e) => setTeamLimits({ callTimeoutMinutes: Number(e.target.value) })}
+              />
+              <TextInput
+                type="number"
+                min={0}
+                step={100000}
+                label={t("workflows.teamLimits.tokens")}
+                value={teamLimits.runTokenBudget}
+                onChange={(e) => setTeamLimits({ runTokenBudget: Number(e.target.value) })}
+              />
+            </DetailFieldGrid>
+            <HelperText>{t("workflows.teamLimits.hint")}</HelperText>
+          </>
+        )}
       </DetailSection>
 
       <DetailSection title={t("workflows.schedules")} description={t("workflows.schedules.hint")}>

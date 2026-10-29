@@ -349,6 +349,42 @@ index.js: listener → WebSocket.send(event) → client
 - Đọc JSONL stream từ `--output-format stream-json`
 - Hỗ trợ agent config: model, permissionMode, allowedTools, disallowedTools, appendSystemPrompt
 
+### 👥 Team: thành viên nhớ các vòng sửa của cùng một công việc
+- Phía server của `ask_agent` nằm ở `runs/team-calls.js` (`createTeamCalls`). Run map, tra agent, process runner và task log được truyền vào, nên test dùng runner giả, không gọi CLI thật.
+- Mỗi lần giao việc được ghi vào `run.delegations` kèm `agentId`, `provider`, `cwd` và `sessionId` mà CLI trả về; câu hỏi được lưu ở `task.question`.
+- Lần gọi sau cho cùng `workItemId`, cùng node đích và cùng agent: Claude/agy mở lại phiên đó (`--resume` / `--conversation`) và chỉ nhận tin nhắn mới. Claude giữ phiên theo thư mục, nên chỉ resume khi `cwd` trùng.
+- Không resume được (Codex, khác thư mục) hoặc resume thất bại: chạy tiến trình mới, kèm tóm tắt lần trước (yêu cầu + câu trả lời) đặt trước yêu cầu mới.
+- `workItemId` mới, hoặc giao cho node/agent khác sau failover: luôn bắt đầu mới.
+- Log của task ghi rõ trường hợp nào đã xảy ra; `task.continuation` là `resumed`, `transcript` hoặc `fresh`.
+
+### 🔀 Team: failover giữa các agent của một thành viên
+- Thành viên có `agentIds` (agent chính trước, dự phòng sau). Team cũ chỉ có `agentId` được đọc thành danh sách một phần tử. Node của thành viên giữ `agentId` = agent chính để mọi chỗ đặt tên theo agent vẫn chạy.
+- Server chọn agent (`runWithFailover` trong `team-calls.js`): bỏ qua agent có CLI chưa cài (`PROVIDER_AVAILABILITY`) và provider đang bị tạm ngưng trong run (`run.providerCooldowns`).
+- Agent lỗi `quota` hoặc `provider_unavailable`: provider bị tạm ngưng tới giờ reset đọc được từ thông báo lỗi (`parseQuotaReset` trong `delegation-policy.js`, hoặc `resetsAt` từ rate-limit event của Claude); không đọc được thì tới hết run. Agent tiếp theo chạy ngay trong cùng lời gọi, cùng `workItemId`, cùng task.
+- Tạm ngưng không có giờ reset bị xoá khi resume hoặc chat tiếp (`clearOpenEndedCooldowns`).
+- Công việc đã xong trên agent nào thì các lần sau ưu tiên agent đó, trừ khi nó không chạy được.
+- Kết quả trả về điều phối viên có `agent` (id, tên, provider); bridge thêm dòng "Thực hiện bởi ...". Quy tắc trong `delegation-policy.js` chỉ áp dụng cho lựa chọn thành viên của điều phối viên.
+- Node Pipeline được gọi qua `ask_agent` vẫn chạy đúng một agent như cũ.
+
+### ♻️ Team: chạy tiếp không làm lại việc đã xong
+- `run.attempt` tăng mỗi lần resume hoặc chat tiếp (`beginAttempt`); mỗi delegation ghi `attempt`, và khi xong thì ghi `answer`.
+- Điều phối viên được chạy tiếp (`coordinatorResumePlan`): mở lại phiên CLI của chính nó nếu cùng agent, provider resume được và cùng thư mục (`task.cwd`); nếu không, hoặc resume thất bại, chạy mới kèm tóm tắt các work item đã xong và câu trả lời của chúng.
+- `ask_agent` từ điều phối viên đã resume, trùng `workItemId`, thành viên và `questionFingerprint` của một delegation đã xong ở lần trước: trả lại `answer` đã lưu, không chạy tiến trình, task có `continuation: "replayed"` (`replayDelegation`). Chat tiếp (`activeTurnId`) không bao giờ replay.
+- Session id được ghi ngay khi CLI báo (`onSessionId` trong runner), nên sau khi server crash vẫn có phiên để mở lại.
+- Thành viên ghi file vào worktree của điều phối viên, nên worktree đó không bị xoá khi điều phối viên dừng hoặc lỗi: `parkWorktree` commit vào nhánh riêng, `reopenWorktree` mở lại đúng thư mục đó khi resume (hoặc chat tiếp). `integrateWorktree` gộp cả các commit đã có sẵn trên nhánh.
+
+### ⛔ Team: giới hạn cho cả run
+- `team.limits` (`normalizeTeamLimits`, mặc định `maxDelegations` 30, `callTimeoutMinutes` 30, `runTokenBudget` 2.000.000, 0 = không giới hạn). `teamToGraph` chép vào node điều phối viên (`teamLimits`) để snapshot của run giữ đúng giới hạn lúc bắt đầu; run cũ không có thì không giới hạn.
+- `checkTeamLimits` chạy trước mỗi `ask_agent` mới (số lần giao + token) và trước mỗi `spawn_agent` (chỉ token). Lời gọi được replay không bị tính, không bị chặn. Lỗi trả về là tool error bảo điều phối viên viết báo cáo cuối, và được ghi vào log của điều phối viên.
+- Hạn giờ: một deadline cho cả lời gọi (kể cả failover). Hết giờ thì `killTaskProcesses(taskId)` giết cả cây tiến trình, lời gọi kết thúc với `failureReason: "timeout"`, không failover, không thử lại.
+- `summarize` trả `teamLimits` (`teamLimitSummary`) để tab Run hiện mức dùng so với giới hạn.
+
+### 🌳 Team: worktree riêng cho từng công việc
+- Chỉ khi workflow bật isolation và thư mục run là git repo. Executor gọi `openTeamWorkspace` khi điều phối viên bắt đầu (worktree của điều phối viên là "base") và `finishWorkItems` + `closeTeamWorkspace` khi nó xong.
+- Thành viên có quyền write/full: mỗi `workItemId` một worktree (`openItemWorktree`, nhánh `ao/<run>/wi-<key>`), tách từ nhánh điều phối viên, dùng lại cho các lần sửa. Thành viên chỉ đọc: làm trong worktree của `reviewOf`, và phải kết thúc bằng `REVIEW: PASS|FAIL` (`parseReviewVerdict`); không có `reviewOf` thì làm ở base.
+- Gộp (`integrateWorktree(..., { into: base })`: kiểm thử rồi merge, từng cái một qua hàng đợi `serial`) khi điều phối viên gọi tool `complete_work_item`, hoặc cuối run với công việc có lần review gần nhất đạt. Ghi file sau review đạt thì phải review lại.
+- Trạng thái lưu ở `run.workItems[workItemId]`: `branch`, `dir`, `status` (`open`/`integrated`/`failed`), `lastReview`.
+
 ---
 
 ## API Public (Export)

@@ -7,13 +7,14 @@ import { nanoid } from "nanoid";
 import {
   openWorkspaceSession,
   createWorktree,
+  reopenWorktree,
+  parkWorktree,
   integrateWorktree,
   closeWorkspaceSession,
   finalizeWorkspaceReview,
   resetWorktree,
 } from "../workspace/workspace.js";
-import { finishDelegation, reserveDelegation } from "./delegation-policy.js";
-import { DEFAULT_CWD, MAX_CALL_DEPTH } from "../../core/config.js";
+import { DEFAULT_CWD, MAX_CALL_DEPTH, PROVIDER_AVAILABILITY } from "../../core/config.js";
 import { buildSpawnedAgent, checkSpawnLimits, spawnedCount, spawnedTokens } from "./spawn-policy.js";
 import { pickRoute, routeInstruction, renderTemplate, resolveInputs } from "../workflows/workflow-model.js";
 import { getAgent } from "../agents/agents.store.js";
@@ -30,7 +31,25 @@ import {
   summarize,
   canResume,
 } from "./run-store.js";
-import { runAgentProcess, killRunProcesses, getBridgeSession } from "./cli-runners.js";
+import { runAgentProcess, killRunProcesses, killTaskProcesses, getBridgeSession } from "./cli-runners.js";
+import { createTeamCalls, snapshotWorkflow, beginAttempt, coordinatorResumePlan, checkTeamLimits } from "./team-calls.js";
+import { addUsage, usageTokens, runTokens } from "./run-usage.js";
+
+/** ask_agent: see team-calls.js. */
+const { askAgent, completeWorkItem: completeTeamWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems } = createTeamCalls({
+  runs,
+  getAgent,
+  agentForNode,
+  nodeTitle,
+  runAgentProcess,
+  newTask,
+  emit,
+  pushTaskLog,
+  isCancelling,
+  providerAvailable: (provider) => !!PROVIDER_AVAILABILITY[provider],
+  killTask: killTaskProcesses,
+  maxCallDepth: MAX_CALL_DEPTH,
+});
 
 /**
  * Marks a run as stopping and kills every process it currently owns. Returns once the signals
@@ -84,88 +103,6 @@ async function decomposePrompt({ runId, taskId, prompt, cwd }) {
   return [prompt];
 }
 
-/**
- * Two-way agent interaction: called (via the HTTP endpoint the mcp-bridge process hits)
- * while `callerNodeId` (a node inside the running `workflowId`) is mid-run inside `runId`.
- * Permission is scoped to that one workflow's graph: `callerNodeId` must list
- * `targetNodeId` in its own `calleeNodeIds` (set in the workflow editor, not on the agent).
- * Spawns the target node's agent synchronously, appends the exchange as its own task in
- * the same run (visible in the UI right alongside whatever triggered it), and returns the
- * callee's full answer text back to the caller's `ask_agent` tool call so it can continue.
- */
-async function askAgent({ runId, workflowId, callerNodeId, targetNodeId, question, workItemId, parentWorkItemId, cwd, depth }) {
-  const run = runs.get(runId);
-  if (!run) throw new Error("Run không tồn tại (có thể đã kết thúc).");
-  if (depth >= MAX_CALL_DEPTH) throw new Error("Đã đạt giới hạn độ sâu gọi agent (chống vòng lặp gọi nhau).");
-
-  // The graph the run started with, not the live workflow: editing a workflow mid-run must not
-  // change who may hand work to whom inside that run.
-  if (!run.workflowId || run.workflowId !== workflowId) throw new Error("Run này không thuộc workflow đó.");
-  const workflow = snapshotWorkflow(run);
-  const callerNode = workflow.nodes.find((n) => n.id === callerNodeId);
-  if (!callerNode?.calleeNodeIds?.includes(targetNodeId)) {
-    throw new Error("Bước này chưa được phép giao việc cho bước đó (mục \"Được giao việc cho\" trong Workflow editor).");
-  }
-  if (targetNodeId === callerNodeId) throw new Error("Một bước không được tự gọi chính nó.");
-
-  const targetNode = workflow.nodes.find((n) => n.id === targetNodeId);
-  if (!targetNode) throw new Error("Bước đích không còn tồn tại trong workflow.");
-  const targetAgent = agentForNode(targetNode);
-
-  const task = newTask(`💬 ${nodeTitle(callerNode)} giao [${workItemId}] cho ${nodeTitle(targetNode)}`, "agent-call", targetNode.id, targetAgent);
-  if (run.activeTurnId) task.turnId = run.activeTurnId; // part of a chat turn: deleted with it
-  const delegation = reserveDelegation(run, {
-    callerNodeId,
-    targetNodeId,
-    workItemId,
-    parentWorkItemId,
-    question,
-    assignmentId: task.id,
-  });
-  task.workItemId = delegation.workItemId;
-  task.parentWorkItemId = delegation.parentWorkItemId;
-  run.tasks.push(task);
-  emit({ runId, taskId: task.id, type: "task-created", task });
-  task.status = "running";
-  emit({ runId, taskId: task.id, type: "task-status", status: "running" });
-  pushTaskLog(runId, task.id, `❓ ${question}`);
-
-  let processResult;
-  try {
-    processResult = await runAgentProcess({
-      runId,
-      taskId: task.id,
-      prompt: targetNode.role ? `Vai trò của bạn trong team (${targetNode.alias}): ${targetNode.role}
-
----
-
-${question}` : question,
-      cwd,
-      agent: targetAgent,
-      node: targetNode,
-      workflow,
-      depth: depth + 1,
-    });
-  } catch (err) {
-    pushTaskLog(runId, task.id, `❌ Lỗi nội bộ khi chạy agent: ${err.message}`);
-    processResult = { ok: false, resultText: "", usage: null, failureReason: "agent_error" };
-  }
-  const { ok, resultText, usage, failureReason, sessionId } = processResult;
-
-  task.resultText = resultText;
-  task.usage = usage;
-  task.sessionId = sessionId || null;
-  task.failureReason = failureReason || null;
-  task.status = isCancelling(runId) ? "cancelled" : ok ? "done" : "error";
-  finishDelegation(delegation, {
-    ok: task.status === "done",
-    failureReason: task.status === "cancelled" ? "cancelled" : failureReason,
-  });
-  emit({ runId, taskId: task.id, type: "task-status", status: task.status });
-
-  return { answer: resultText, ok: task.status === "done", failureReason: task.failureReason };
-}
-
 /** --------------------------- spawn_agent: supervisor creates agents on the fly --------------------------- */
 
 /**
@@ -191,6 +128,8 @@ async function spawnAgent({ sessionId, provider, model, tools, accessLevel, prom
   if (!String(prompt || "").trim()) throw new Error("Thiếu prompt cho agent mới.");
 
   checkSpawnLimits(run, policy);
+  // The Team's token budget covers spawned agents too.
+  checkTeamLimits(run, snapshotWorkflow(run).nodes.find((n) => n.id === session.nodeId)?.teamLimits, { delegation: false });
 
   const { spawn, ...agentConfig } = buildSpawnedAgent(policy, supervisor, { provider, model, tools, accessLevel });
   const parentTask = run.tasks.find((t) => t.id === parentTaskId);
@@ -390,17 +329,6 @@ function emptyCheckpoint() {
   return { nodeStates: {}, outputs: {}, routerChoice: {} };
 }
 
-/** Rebuilds the workflow object a run executes against, from the run's own snapshot. */
-function snapshotWorkflow(run) {
-  return {
-    id: run.workflowId,
-    nodes: run.workflowNodes || [],
-    edges: run.workflowEdges || [],
-    isolation: run.workflowIsolation || { enabled: false, testCommand: "", keepOnFailure: true },
-    limits: run.workflowLimits || {},
-  };
-}
-
 function launchWorkflowRun(run) {
   process.nextTick(() =>
     executeWorkflowRun(run, snapshotWorkflow(run)).catch((err) => {
@@ -441,6 +369,7 @@ function resumeRun(runId) {
   run.error = null;
   run.resumedAt = Date.now();
   run.lastActivityAt = run.resumedAt;
+  beginAttempt(run);
   emit({ runId, type: "run-status", status: "running" });
 
   launchWorkflowRun(run);
@@ -606,6 +535,7 @@ async function executeWorkflowRun(run, workflow) {
     await executeGraph(run, workflow, workspace, keptDirs);
   } finally {
     clearTimeout(timer);
+    closeTeamWorkspace(run.id); // normally closed already; this covers a run that threw
     // The run is over one way or another; a later resume must not inherit the stop flag.
     cancelling.delete(run.id);
     if (workspace) await finalizeRunReview(run, workspace, keptDirs);
@@ -616,27 +546,6 @@ async function executeWorkflowRun(run, workflow) {
     emit({ runId: run.id, type: "run-status", status: "error", error: run.error });
   }
 }
-
-/** Tokens a usage record counts against a budget: input + output + cache writes (as spawn_agent). */
-const usageTokens = (u) => (u ? (u.inputTokens || 0) + (u.outputTokens || 0) + (u.cacheCreationTokens || 0) : 0);
-
-/** Sum of two usage records — a node's attempts (retries, failover) all land on its one task. */
-function addUsage(a, b) {
-  if (!a) return b || null;
-  if (!b) return a;
-  const sum = (k) => (a[k] || 0) + (b[k] || 0);
-  return {
-    provider: b.provider || a.provider,
-    inputTokens: sum("inputTokens"),
-    outputTokens: sum("outputTokens"),
-    cacheReadTokens: sum("cacheReadTokens"),
-    cacheCreationTokens: sum("cacheCreationTokens"),
-    costUsd: typeof a.costUsd === "number" || typeof b.costUsd === "number" ? (a.costUsd || 0) + (b.costUsd || 0) : null,
-    durationMs: sum("durationMs"),
-  };
-}
-
-const runTokens = (run) => run.tasks.reduce((n, t) => n + usageTokens(t.usage), 0);
 
 /** Waits `ms`, waking early when the run is being stopped. */
 async function sleepUnlessStopped(runId, ms) {
@@ -743,14 +652,24 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
    * router answer with no valid ROUTE; on quota or an unavailable CLI, straight to the next agent
    * in its fallback list. Every attempt starts from a clean worktree and adds to the same task.
    * Returns { ok, resultText, stop } — `stop` when the run itself must end (budget, cancel).
+   *
+   * `resume` (a resumed Team coordinator, see coordinatorResumePlan): the first attempt picks the
+   * coordinator's CLI session back up with `resume.message`; if that fails, it and any later
+   * attempt start fresh on `resume.fallbackPrompt` (the summary of finished work, then the prompt).
    */
-  async function runNode(n, task, wt, nodeCwd, nodePrompt, validate) {
+  async function runNode(n, task, wt, nodeCwd, nodePrompt, validate, resume = null) {
     const log = (line) => pushTaskLog(runId, task.id, line);
     const candidates = [agentForNode(n), ...(n.fallbackAgentIds || []).map((id) => getAgent(id))].filter(Boolean);
     let ci = 0;
     let retriesLeft = n.retries || 0;
     let attempt = 0;
     let lastText = "";
+    if (resume) nodePrompt = resume.fallbackPrompt;
+    // Recorded as soon as the CLI reports it: after a crash this is what a resume picks up.
+    const onSessionId = (id) => {
+      task.sessionId = id;
+      scheduleSaveRuns();
+    };
 
     while (true) {
       if (isCancelling(runId)) return { ok: false, resultText: lastText, cancelled: true };
@@ -771,16 +690,29 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
       task.agentName = agent.name;
       task.provider = agent.provider || "claude";
 
-      const result = await runAgentProcess({
+      const base = {
         runId,
         taskId: task.id,
-        prompt: nodePrompt,
         cwd: nodeCwd,
         agent,
         node: n,
         workflow,
         timeoutMs: n.timeoutSec ? n.timeoutSec * 1000 : 0,
-      });
+        onSessionId,
+      };
+      let result;
+      if (resume && attempt === 1) {
+        log("↩️ Tiếp tục phiên CLI của điều phối viên từ lần chạy bị gián đoạn.");
+        result = await runAgentProcess({ ...base, prompt: resume.message, resume: resume.sessionId });
+        if (!result.ok && !result.resultText && !isCancelling(runId) && !FAILOVER_ON.includes(result.failureReason)) {
+          log("⚠️ Không mở lại được phiên cũ, chạy lại kèm tóm tắt các việc đã xong.");
+          task.usage = addUsage(task.usage, result.usage);
+          nodeTokens.set(n.id, (nodeTokens.get(n.id) || 0) + usageTokens(result.usage));
+          result = await runAgentProcess({ ...base, prompt: nodePrompt });
+        }
+      } else {
+        result = await runAgentProcess({ ...base, prompt: nodePrompt });
+      }
       task.usage = addUsage(task.usage, result.usage);
       task.sessionId = result.sessionId || task.sessionId || null;
       nodeTokens.set(n.id, (nodeTokens.get(n.id) || 0) + usageTokens(result.usage));
@@ -896,9 +828,10 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
       taskIdByNode.set(n.id, task.id);
       emit({ runId, taskId: task.id, type: "task-created", task });
 
-      const wt = isolateBatch
-        ? await createWorktree(workspace.session, n.id, (line) => pushTaskLog(runId, task.id, line))
-        : null;
+      // A Team coordinator's folder holds its members' work, so a resume reopens the one from
+      // the interrupted attempt (see reopenWorktree) instead of starting from the review branch.
+      const openWorktree = n.teamRole === "coordinator" ? reopenWorktree : createWorktree;
+      const wt = isolateBatch ? await openWorktree(workspace.session, n.id, (line) => pushTaskLog(runId, task.id, line)) : null;
       batch.push({ node: n, task, wt, cwd: wt ? wt.dir : cwd });
     }
 
@@ -918,6 +851,22 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
             : buildNodePrompt(n.promptTemplate, prompt, inputs, templateContext());
         if (n.kind === "router") nodePrompt += routeInstruction(outgoingOf.get(n.id));
 
+        // A resumed Team coordinator continues its own session, or starts over knowing what its
+        // members already finished (their calls are then answered from the run, see team-calls.js).
+        let resume = null;
+        if (n.teamRole === "coordinator") {
+          // With isolation on, each work item a member writes gets its own worktree off this one.
+          if (wt && workflow.isolation?.enabled) openTeamWorkspace(runId, { session: workspace.session, base: wt, keptDirs });
+          task.cwd = nodeCwd; // Claude keeps sessions per folder: a resume has to match it
+          const plan = coordinatorResumePlan(run, n, { agent: agentForNode(n), cwd: nodeCwd });
+          const fallbackPrompt = plan?.preamble ? `${plan.preamble}\n\n---\n\n${nodePrompt}` : nodePrompt;
+          if (plan?.mode === "resume") resume = { sessionId: plan.sessionId, message: plan.message, fallbackPrompt };
+          else if (plan?.mode === "summary") {
+            nodePrompt = fallbackPrompt;
+            pushTaskLog(runId, task.id, "📋 Không mở lại được phiên cũ của điều phối viên: chạy lại từ đầu, kèm tóm tắt các việc đã xong.");
+          }
+        }
+
         task.status = "running";
         emit({ runId, taskId: task.id, type: "task-status", status: "running" });
 
@@ -936,7 +885,7 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
               }
             : null;
 
-        const { ok, resultText, cancelled } = await runNode(n, task, wt, nodeCwd, nodePrompt, validateRoute);
+        const { ok, resultText, cancelled } = await runNode(n, task, wt, nodeCwd, nodePrompt, validateRoute, resume);
         task.resultText = resultText;
         output.set(n.id, resultText);
 
@@ -969,6 +918,19 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
       if (!wt) continue;
       const agentFailed = stopping || state.get(n.id) === "error";
       if (stopping) pushTaskLog(runId, task.id, "🛑 Run bị dừng — bỏ qua kiểm thử và gộp nhánh cho không gian riêng này.");
+      // A Team coordinator that didn't finish keeps its folder for "Resume": the work its
+      // members already finished is in there, and a resume tells the coordinator it is done.
+      if (agentFailed && n.teamRole === "coordinator") {
+        closeTeamWorkspace(runId); // its work items stay on their branches for the resume
+        await parkWorktree(workspace.session, wt, (line) => pushTaskLog(runId, task.id, line));
+        keptDirs.push(wt.dir);
+        continue;
+      }
+      if (n.teamRole === "coordinator") {
+        // Reviewed work items land in the coordinator's branch before it goes into the review.
+        await finishWorkItems(runId, (line) => pushTaskLog(runId, task.id, line));
+        closeTeamWorkspace(runId);
+      }
       const { ok } = await integrateWorktree(workspace.session, wt, {
         title: `${nodeTitle(n)} (${runId})`,
         agentFailed,
@@ -1086,6 +1048,7 @@ function continueRun(runId, message) {
   run.status = "running";
   run.error = null;
   run.lastActivityAt = Date.now();
+  beginAttempt(run);
   emit({ runId, type: "run-status", status: "running" });
   process.nextTick(() =>
     executeFollowUp(run, lead, message).catch((err) => {
@@ -1129,9 +1092,11 @@ async function executeFollowUp(run, { agent, node, workflow }, message) {
     let wt = null;
     if (workspace) {
       if (node) {
-        wt = await createWorktree(workspace.session, node.id, log);
+        // A Team coordinator parked by a stop or failure still holds its members' work.
+        wt = await (node.teamRole === "coordinator" ? reopenWorktree : createWorktree)(workspace.session, node.id, log);
         if (!wt) throw new Error("Không tạo được workspace riêng cho lượt chat này.");
         cwd = wt.dir;
+        if (node.teamRole === "coordinator" && workflow?.isolation?.enabled) openTeamWorkspace(runId, { session: workspace.session, base: wt, keptDirs });
       } else cwd = workspace.session.reviewDir;
     }
 
@@ -1156,6 +1121,10 @@ async function executeFollowUp(run, { agent, node, workflow }, message) {
 
     if (wt) {
       const stopping = isCancelling(runId);
+      if (node.teamRole === "coordinator") {
+        if (!stopping && task.status === "done") await finishWorkItems(runId, log);
+        closeTeamWorkspace(runId);
+      }
       const { ok } = await integrateWorktree(workspace.session, wt, {
         title: `${nodeTitle(node)} — chat (${runId})`,
         agentFailed: stopping || task.status !== "done",
@@ -1169,6 +1138,7 @@ async function executeFollowUp(run, { agent, node, workflow }, message) {
     }
     run.status = isCancelling(runId) ? "cancelled" : task.status === "done" ? "done" : "error";
   } finally {
+    closeTeamWorkspace(runId);
     run.activeTurnId = null;
     cancelling.delete(runId);
     if (workspace) await finalizeRunReview(run, workspace, keptDirs);
@@ -1202,4 +1172,17 @@ function deleteChat(runId, turnId = null) {
   return true;
 }
 
-export { startRun, startWorkflowRun, stopRun, resumeRun, continueRun, deleteChat, askAgent, spawnAgent };
+/**
+ * The `complete_work_item` bridge tool. Like spawn_agent, the caller is identified by its bridge
+ * session alone, and only a Team coordinator may merge its members' work items.
+ */
+async function completeWorkItem({ sessionId, workItemId }) {
+  const session = getBridgeSession(sessionId);
+  if (!session) throw new Error("Phiên agent-bridge không hợp lệ hoặc đã kết thúc.");
+  const run = runs.get(session.runId);
+  const node = run && snapshotWorkflow(run).nodes.find((n) => n.id === session.nodeId);
+  if (node?.teamRole !== "coordinator") throw new Error("Chỉ điều phối viên của Team mới gộp được công việc của thành viên.");
+  return completeTeamWorkItem({ runId: session.runId, workItemId, callerTaskId: session.taskId });
+}
+
+export { startRun, startWorkflowRun, stopRun, resumeRun, continueRun, deleteChat, askAgent, spawnAgent, completeWorkItem };

@@ -11,7 +11,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const read = (rel) => readFileSync(path.join(here, rel), "utf8");
 
 test("run-side server code never writes workflows and only reads one to snapshot it", () => {
-  for (const file of ["executor.js", "run-store.js", "cli-runners.js", "spawn-policy.js", "runs.routes.js"]) {
+  for (const file of ["executor.js", "team-calls.js", "run-store.js", "cli-runners.js", "spawn-policy.js", "runs.routes.js"]) {
     const src = read(file);
     for (const fn of ["createWorkflow", "updateWorkflow", "deleteWorkflow", "saveWorkflows"]) {
       assert.ok(!new RegExp(`\\b${fn}\\b`).test(src), `${file} must not use ${fn}`);

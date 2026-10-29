@@ -89,7 +89,7 @@ const CONTENT = {
             items: [
               "Vào tab Workflows, bấm \"+ Tạo workflow mới\", chọn Team.",
               "Ở mục Điều phối, chọn agent điều phối và viết quy trình làm việc, ví dụ: chia việc, giao code cho fe-main, gửi kết quả cho reviewer, sửa tới khi đạt rồi tổng kết. Chỉ cần mô tả quy trình. Yêu cầu của người dùng được tự thêm vào cuối, hoặc bạn tự đặt chỗ bằng {{prompt}}.",
-              "Ở mục Thành viên, bấm \"+ Thêm thành viên\" cho từng người: alias dễ đọc (vd: fe-main, fe-backup, reviewer), agent, và một câu mô tả vai trò.",
+              "Ở mục Thành viên, bấm \"+ Thêm thành viên\" cho từng người: alias dễ đọc (vd: fe-main, reviewer), danh sách agent theo thứ tự thử, và một câu mô tả vai trò. Agent đầu tiên làm việc; khi nó hết quota hoặc CLI chưa cài, server tự chuyển sang agent kế tiếp của chính thành viên đó, điều phối viên không cần chọn agent dự phòng.",
               "Tuỳ chọn: bật \"Cho điều phối viên tạo agent mới khi chạy\" rồi chọn provider, model và giới hạn được phép. Agent con không bao giờ có quyền hay tool vượt quá điều phối viên. Team có thể không có thành viên nào nếu điều phối viên chỉ tự tạo agent.",
               "Bấm Lưu.",
             ],
@@ -279,7 +279,7 @@ const CONTENT = {
             items: [
               "In the Workflows tab click \"+ New workflow\" and pick Team.",
               "Under Coordinator, choose the coordinator agent and describe how the team works, e.g. split the work, give coding to fe-main, send the result to reviewer, iterate until it passes, then summarize. Describe the process only: the user's request is appended automatically, or place it yourself with {{prompt}}.",
-              "Under Members, click \"+ Add member\" for each one: a readable alias (e.g. fe-main, fe-backup, reviewer), an agent, and a one-line role.",
+              "Under Members, click \"+ Add member\" for each one: a readable alias (e.g. fe-main, reviewer), its agents in the order to try them, and a one-line role. The first agent does the work; when it is out of quota or its CLI isn't installed, the server moves on to the member's next agent, so the coordinator never has to pick a backup.",
               "Optional: turn on \"Let the coordinator create new agents\" and choose the allowed providers, models and limits. A spawned agent never gets more access or tools than the coordinator itself. A Team may have no members at all if the coordinator only spawns.",
               "Click Save.",
             ],
