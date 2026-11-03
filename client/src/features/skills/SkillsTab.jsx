@@ -9,7 +9,10 @@ export default function SkillsTab() {
   const { t } = usePreferences();
   const [skills, setSkills] = useState([]);
   const [agents, setAgents] = useState([]);
+  const [workflows, setWorkflows] = useState([]);
   const [confirmTarget, setConfirmTarget] = useState(null);
+  // What the server said when it refused a delete the list below did not predict.
+  const [deleteError, setDeleteError] = useState("");
 
   function refresh() {
     api.listSkills().then((d) => setSkills(d.skills));
@@ -18,21 +21,31 @@ export default function SkillsTab() {
   useEffect(() => {
     refresh();
     api.listAgents().then((d) => setAgents(d.agents));
+    api.listWorkflows().then((d) => setWorkflows(d.workflows));
   }, []);
 
-  const usedBy = (skillId) => agents.filter((a) => a.skillIds?.includes(skillId));
+  // Agents, and the blueprints of Teams (shown as "workflow / blueprint"), that use the skill.
+  const usedBy = (skillId) => [
+    ...agents.filter((a) => a.skillIds?.includes(skillId)).map((a) => a.name),
+    ...workflows.flatMap((w) => (w.team?.blueprints || []).filter((b) => b.skillIds?.includes(skillId)).map((b) => `${w.name} / ${b.name}`)),
+  ];
   const usedByCount = (skillId) => usedBy(skillId).length;
 
   async function confirmDelete() {
     const skill = confirmTarget;
     setConfirmTarget(null);
     if (!skill) return;
-    await api.deleteSkill(skill.id);
+    try {
+      await api.deleteSkill(skill.id);
+    } catch (err) {
+      setDeleteError(t("skills.deleteFailed", { name: skill.name, error: err.message }));
+    }
     refresh();
     api.listAgents().then((d) => setAgents(d.agents));
+    api.listWorkflows().then((d) => setWorkflows(d.workflows));
   }
 
-  const blockedNames = confirmTarget ? usedBy(confirmTarget.id).map((a) => a.name) : [];
+  const blockedNames = confirmTarget ? usedBy(confirmTarget.id) : [];
   const isBlocked = blockedNames.length > 0;
 
   return (
@@ -67,6 +80,16 @@ export default function SkillsTab() {
           reason={isBlocked ? t("skills.deleteBlocked", { name: confirmTarget.name, names: blockedNames.join(", ") }) : ""}
           onConfirm={confirmDelete}
           onClose={() => setConfirmTarget(null)}
+        />
+      )}
+
+      {deleteError && (
+        <ConfirmModal
+          title={t("common.delete")}
+          blocked
+          reason={deleteError}
+          onConfirm={() => setDeleteError("")}
+          onClose={() => setDeleteError("")}
         />
       )}
     </div>

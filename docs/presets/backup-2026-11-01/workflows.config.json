@@ -1,0 +1,544 @@
+[
+  {
+    "id": "g9enjVOu",
+    "name": "build new feature",
+    "description": "PM goi FE, doi xong, goi reviewer; reviewer bao lai PM de PM quyet dinh (lap lai neu can sua)",
+    "type": "pipeline",
+    "isolation": {
+      "enabled": false,
+      "testCommand": "",
+      "keepOnFailure": true
+    },
+    "inputs": [],
+    "limits": {
+      "timeoutMin": 0,
+      "tokenBudget": 0
+    },
+    "schedules": [],
+    "nodes": [
+      {
+        "id": "ng8n4t0",
+        "agentId": "oqHrb32j",
+        "promptTemplate": "Bạn là Project Manager điều phối xây dựng tính năng mới.\n\nYêu cầu gốc: {{prompt}}\n\nCHÍNH SÁCH PHÂN CÔNG BẮT BUỘC:\n- Một công việc logic chỉ có MỘT agent sở hữu. Tuyệt đối không giao cùng một việc cho cả hai Frontend Engineer.\n- Mỗi lần dùng ask_agent phải truyền workItemId ổn định. Khi yêu cầu sửa hoặc làm tiếp cùng việc, giữ nguyên workItemId và gọi lại đúng agent đang sở hữu.\n- Chỉ được chuyển cùng workItemId sang FE còn lại khi tool trả về failureReason=quota hoặc failureReason=provider_unavailable. Không tự suy đoán agent hết quota.\n- Chỉ được gọi thêm agent cho một subtask thật sự khác, có phạm vi không chồng lặp: đặt workItemId mới và parentWorkItemId=\"root\" hoặc mã công việc cha. Không được đổi mã để giao lại cùng nội dung.\n\nQuy trình:\n1. Phân tích yêu cầu. Nếu không cần chia nhỏ, chọn đúng MỘT FE làm owner (ưu tiên id=\"nwvl6e3\"), gọi với workItemId=\"feature-implementation\" và chờ hoàn tất. Nếu owner thất bại vì quota/provider_unavailable, mới gọi FE dự phòng id=\"nigms9o\" với CÙNG workItemId.\n2. Nếu cần chia nhỏ, mô tả rõ các subtask không trùng phạm vi. Mỗi subtask có workItemId riêng, parentWorkItemId=\"root\", và chỉ giao cho một FE. Không cho hai FE cùng sửa một component/file/phạm vi.\n3. Gọi Code Reviewer id=\"nvoy5zi\" bằng một công việc review riêng: workItemId=\"feature-review\", parentWorkItemId=\"feature-implementation\" (hoặc \"root\" nếu đã chia nhiều subtask). Gửi tóm tắt thay đổi và chờ review.\n4. Nếu reviewer yêu cầu sửa, gọi lại ĐÚNG FE đang sở hữu workItemId cần sửa, giữ nguyên workItemId. Chỉ failover sang FE khác khi tool xác nhận quota/provider_unavailable. Sau đó gọi lại reviewer với workItemId=\"feature-review\". Tối đa 2 vòng sửa.\n5. Viết báo cáo cuối, nêu owner của từng workItemId, số vòng sửa và kết luận sẵn sàng merge hay cần người xử lý.\n\nKHÔNG tự code, KHÔNG tự review, KHÔNG giao trùng việc cho nhiều agent.",
+        "kind": "agent",
+        "calleeNodeIds": [
+          "nwvl6e3",
+          "nvoy5zi",
+          "nigms9o"
+        ],
+        "autoStart": true,
+        "name": "",
+        "fallbackAgentIds": [],
+        "retries": 0,
+        "retryDelaySec": 10,
+        "timeoutSec": 0,
+        "tokenBudget": 0,
+        "x": -73,
+        "y": 154
+      },
+      {
+        "id": "nwvl6e3",
+        "agentId": "pNE5tlu0",
+        "promptTemplate": "",
+        "kind": "agent",
+        "calleeNodeIds": [
+          "ng8n4t0"
+        ],
+        "autoStart": false,
+        "name": "",
+        "fallbackAgentIds": [],
+        "retries": 0,
+        "retryDelaySec": 10,
+        "timeoutSec": 0,
+        "tokenBudget": 0,
+        "x": 204,
+        "y": 21
+      },
+      {
+        "id": "nvoy5zi",
+        "agentId": "BG7WBx7Z",
+        "promptTemplate": "",
+        "kind": "agent",
+        "calleeNodeIds": [
+          "ng8n4t0"
+        ],
+        "autoStart": false,
+        "name": "",
+        "fallbackAgentIds": [],
+        "retries": 0,
+        "retryDelaySec": 10,
+        "timeoutSec": 0,
+        "tokenBudget": 0,
+        "x": 206,
+        "y": 248
+      },
+      {
+        "id": "nigms9o",
+        "agentId": "p8_MgAVN",
+        "promptTemplate": "",
+        "kind": "agent",
+        "calleeNodeIds": [
+          "ng8n4t0"
+        ],
+        "autoStart": false,
+        "name": "",
+        "fallbackAgentIds": [],
+        "retries": 0,
+        "retryDelaySec": 10,
+        "timeoutSec": 0,
+        "tokenBudget": 0,
+        "x": 352,
+        "y": 118
+      }
+    ],
+    "edges": []
+  },
+  {
+    "id": "rxTeam01",
+    "name": "React feature team",
+    "description": "Coordinator chia việc, engineer (Sonnet) làm chính, engineer-agy dự phòng, reviewer duyệt và chạy check. Có thể tạo agent phụ chỉ đọc để tìm hiểu.",
+    "type": "team",
+    "isolation": {
+      "enabled": false,
+      "testCommand": "",
+      "keepOnFailure": true
+    },
+    "inputs": [],
+    "limits": {
+      "timeoutMin": 0,
+      "tokenBudget": 0
+    },
+    "schedules": [],
+    "team": {
+      "coordinator": {
+        "agentId": "rxCoord1",
+        "process": "## Routing\n- engineer (Claude Sonnet) owns all implementation work by default.\n- engineer-agy is the backup for engineer. Hand it a work item only when ask_agent reports quota or provider_unavailable for engineer, and keep the same workItemId.\n- engineer-agy may also take a second work item in parallel, but only when the two items live in different folders and share no files.\n- engineer-agy cannot run shell commands. For its work items, the reviewer's check results are the only verification: do not ask engineer-agy to run typecheck, lint or tests.\n- reviewer never writes code. It only reviews.\n\n## Order\n1. Shared code first: types, API client, shared hooks and components. One owner, finished and reviewed before anything depends on it.\n2. Then feature work, parallel only under the rule above.\n3. Review once per work item, after its engineer reports back.\n\n## Review gate\n- Every work item that changes code goes to reviewer, with the brief, the list of changed files and the engineer's verification results.\n- Pass means reviewer answered VERDICT: PASS. Non-blocking suggestions go into the final report, not into another fix round.\n- Fix rounds go back to the owner of that work item, max 2.\n\n## This project\n- Follow AGENTS.md / CLAUDE.md if the repo has one.\n- Verify with the typecheck, lint and test scripts in package.json. If a script is missing, say so in the final report instead of inventing one.\n- Do not touch: .env files, lockfiles (unless a dependency was approved), CI config, generated code.\n\n## Done\nA work item is done only when typecheck, lint and tests pass (as run by the engineer or, for engineer-agy, by reviewer) and reviewer answered VERDICT: PASS.\n"
+      },
+      "members": [
+        {
+          "alias": "engineer",
+          "agentIds": [
+            "rxEng001"
+          ],
+          "role": "Main React engineer. Implements work items from a brief and reports changed files plus typecheck/lint/test results."
+        },
+        {
+          "alias": "engineer-agy",
+          "agentIds": [
+            "rxEng001"
+          ],
+          "role": "Backup React engineer . Can edit code but cannot run shell commands, so it reports verification as not run; reviewer runs the checks."
+        },
+        {
+          "alias": "reviewer",
+          "agentIds": [
+            "rxReview"
+          ],
+          "role": "Reviews one work item: runs checks, compares with the brief, answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED. Never edits files."
+        }
+      ],
+      "spawnPolicy": {
+        "enabled": true,
+        "providers": [
+          "claude"
+        ],
+        "claudeModels": [
+          "sonnet",
+          "claude-haiku-4-5-20251001"
+        ],
+        "codexModels": [],
+        "geminiModels": [],
+        "maxAgents": 3,
+        "tokenBudget": 300000,
+        "maxAccessLevel": "read"
+      },
+      "blueprints": [],
+      "limits": {
+        "maxDelegations": 30,
+        "callTimeoutMinutes": 30,
+        "runTokenBudget": 2000000
+      }
+    },
+    "nodes": [
+      {
+        "id": "coordinator",
+        "agentId": "rxCoord1",
+        "promptTemplate": "## Routing\n- engineer (Claude Sonnet) owns all implementation work by default.\n- engineer-agy is the backup for engineer. Hand it a work item only when ask_agent reports quota or provider_unavailable for engineer, and keep the same workItemId.\n- engineer-agy may also take a second work item in parallel, but only when the two items live in different folders and share no files.\n- engineer-agy cannot run shell commands. For its work items, the reviewer's check results are the only verification: do not ask engineer-agy to run typecheck, lint or tests.\n- reviewer never writes code. It only reviews.\n\n## Order\n1. Shared code first: types, API client, shared hooks and components. One owner, finished and reviewed before anything depends on it.\n2. Then feature work, parallel only under the rule above.\n3. Review once per work item, after its engineer reports back.\n\n## Review gate\n- Every work item that changes code goes to reviewer, with the brief, the list of changed files and the engineer's verification results.\n- Pass means reviewer answered VERDICT: PASS. Non-blocking suggestions go into the final report, not into another fix round.\n- Fix rounds go back to the owner of that work item, max 2.\n\n## This project\n- Follow AGENTS.md / CLAUDE.md if the repo has one.\n- Verify with the typecheck, lint and test scripts in package.json. If a script is missing, say so in the final report instead of inventing one.\n- Do not touch: .env files, lockfiles (unless a dependency was approved), CI config, generated code.\n\n## Done\nA work item is done only when typecheck, lint and tests pass (as run by the engineer or, for engineer-agy, by reviewer) and reviewer answered VERDICT: PASS.\n",
+        "kind": "agent",
+        "teamRole": "coordinator",
+        "calleeNodeIds": [
+          "engineer",
+          "engineer-agy",
+          "reviewer"
+        ],
+        "autoStart": true,
+        "spawnPolicy": {
+          "enabled": true,
+          "providers": [
+            "claude"
+          ],
+          "claudeModels": [
+            "sonnet",
+            "claude-haiku-4-5-20251001"
+          ],
+          "codexModels": [],
+          "geminiModels": [],
+          "maxAgents": 3,
+          "tokenBudget": 300000,
+          "maxAccessLevel": "read"
+        },
+        "blueprints": [],
+        "teamLimits": {
+          "maxDelegations": 30,
+          "callTimeoutMinutes": 30,
+          "runTokenBudget": 2000000
+        }
+      },
+      {
+        "id": "engineer",
+        "agentId": "rxEng001",
+        "agentIds": [
+          "rxEng001"
+        ],
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "engineer",
+        "role": "Main React engineer. Implements work items from a brief and reports changed files plus typecheck/lint/test results.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      },
+      {
+        "id": "engineer-agy",
+        "agentId": "rxEng001",
+        "agentIds": [
+          "rxEng001"
+        ],
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "engineer-agy",
+        "role": "Backup React engineer . Can edit code but cannot run shell commands, so it reports verification as not run; reviewer runs the checks.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      },
+      {
+        "id": "reviewer",
+        "agentId": "rxReview",
+        "agentIds": [
+          "rxReview"
+        ],
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "reviewer",
+        "role": "Reviews one work item: runs checks, compares with the brief, answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED. Never edits files.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      }
+    ],
+    "edges": []
+  },
+  {
+    "id": "ytStudio",
+    "name": "YouTube script studio",
+    "description": "Producer chọn chủ đề, researcher kiểm chứng, writer viết theo SCRIPT_GUIDE.md, editor duyệt. Kết quả: video-script/<slug>.md trong repo Remotion.",
+    "type": "team",
+    "isolation": {
+      "enabled": false,
+      "testCommand": "",
+      "keepOnFailure": true
+    },
+    "inputs": [],
+    "limits": {
+      "timeoutMin": 0,
+      "tokenBudget": 0
+    },
+    "schedules": [],
+    "team": {
+      "coordinator": {
+        "agentId": "ytProd01",
+        "process": "## Read the request\n- Format: \"short\" (default) or \"long\". The user may also ask for several scripts at once; default is 1.\n- Topic: if the user names one, use it. If not, run topic scouting.\n\n## Steps\n1. Topic (only if none was given): ask researcher for topic scouting. Pick the candidate with the strongest result-first hook and the lowest risk notes; if several scripts are requested, pick that many distinct topics.\n2. Fact pack: ask researcher for a fact pack on each chosen topic. One work item per topic.\n3. Draft: give writer a brief per topic with the format, the angle, the hook idea and the full fact pack pasted in. One work item per script; scripts on different topics may run in parallel.\n4. Review: send each draft to editor, together with the fact pack it was built from.\n5. Fix: on VERDICT: CHANGES_REQUESTED, send the blocking issues back to the SAME writer work item. At most 2 fix rounds per script; after that keep the best version and flag it for a human.\n6. Save: once a script has VERDICT: PASS (or is flagged after 2 rounds), give it a short kebab-case slug and ask writer to save it to video-script/<slug>.md.\n\n## Rules\n- Writer and editor never see each other directly; you pass the fact pack and the issues between them.\n- Do not spawn agents to write scripts. Spawned helpers (if available) are only for extra research.\n- Never use an em dash in anything you write.\n\n## Final report (in Vietnamese)\nFor each script:\n- chủ đề, định dạng, lý do chọn (1 câu)\n- slug và đường dẫn file đã lưu (video-script/<slug>.md)\n- số từ và thời lượng ước tính\n- kết quả duyệt và số vòng sửa\n- nguồn chính (2 đến 3 link)\nThen: các giả định đã đặt ra, anything that needs the owner before recording (for example [NEEDS SOURCE] or [VERIFY] marks), and the next step: thu giọng ElevenLabs từ phần \"Voiceover cho ElevenLabs\", lưu thành public/voiceover/<slug>.mp3, rồi chạy workflow \"YouTube video builder\" với slug đó.\n"
+      },
+      "members": [
+        {
+          "alias": "researcher",
+          "agentIds": [
+            "ytRsrch1"
+          ],
+          "role": "Finds hot AI/no-code topics (topic scouting) and builds sourced fact packs for a chosen topic. Read-only, uses the web."
+        },
+        {
+          "alias": "writer",
+          "agentIds": [
+            "ytWritr1"
+          ],
+          "role": "Writes Shorts or long-form scripts from a brief and fact pack, following SCRIPT_GUIDE.md when present; saves the final version to video-script/<slug>.md."
+        },
+        {
+          "alias": "editor",
+          "agentIds": [
+            "ytEditr1"
+          ],
+          "role": "Checks a script against the handbook and the fact pack, spot-checks sources, answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED."
+        }
+      ],
+      "spawnPolicy": {
+        "enabled": false,
+        "providers": [],
+        "claudeModels": [],
+        "codexModels": [],
+        "geminiModels": [],
+        "maxAgents": 3,
+        "tokenBudget": 300000,
+        "maxAccessLevel": "read"
+      },
+      "blueprints": [],
+      "limits": {
+        "maxDelegations": 30,
+        "callTimeoutMinutes": 30,
+        "runTokenBudget": 2000000
+      }
+    },
+    "nodes": [
+      {
+        "id": "coordinator",
+        "agentId": "ytProd01",
+        "promptTemplate": "## Read the request\n- Format: \"short\" (default) or \"long\". The user may also ask for several scripts at once; default is 1.\n- Topic: if the user names one, use it. If not, run topic scouting.\n\n## Steps\n1. Topic (only if none was given): ask researcher for topic scouting. Pick the candidate with the strongest result-first hook and the lowest risk notes; if several scripts are requested, pick that many distinct topics.\n2. Fact pack: ask researcher for a fact pack on each chosen topic. One work item per topic.\n3. Draft: give writer a brief per topic with the format, the angle, the hook idea and the full fact pack pasted in. One work item per script; scripts on different topics may run in parallel.\n4. Review: send each draft to editor, together with the fact pack it was built from.\n5. Fix: on VERDICT: CHANGES_REQUESTED, send the blocking issues back to the SAME writer work item. At most 2 fix rounds per script; after that keep the best version and flag it for a human.\n6. Save: once a script has VERDICT: PASS (or is flagged after 2 rounds), give it a short kebab-case slug and ask writer to save it to video-script/<slug>.md.\n\n## Rules\n- Writer and editor never see each other directly; you pass the fact pack and the issues between them.\n- Do not spawn agents to write scripts. Spawned helpers (if available) are only for extra research.\n- Never use an em dash in anything you write.\n\n## Final report (in Vietnamese)\nFor each script:\n- chủ đề, định dạng, lý do chọn (1 câu)\n- slug và đường dẫn file đã lưu (video-script/<slug>.md)\n- số từ và thời lượng ước tính\n- kết quả duyệt và số vòng sửa\n- nguồn chính (2 đến 3 link)\nThen: các giả định đã đặt ra, anything that needs the owner before recording (for example [NEEDS SOURCE] or [VERIFY] marks), and the next step: thu giọng ElevenLabs từ phần \"Voiceover cho ElevenLabs\", lưu thành public/voiceover/<slug>.mp3, rồi chạy workflow \"YouTube video builder\" với slug đó.\n",
+        "kind": "agent",
+        "teamRole": "coordinator",
+        "calleeNodeIds": [
+          "researcher",
+          "writer",
+          "editor"
+        ],
+        "autoStart": true,
+        "spawnPolicy": {
+          "enabled": false,
+          "providers": [],
+          "claudeModels": [],
+          "codexModels": [],
+          "geminiModels": [],
+          "maxAgents": 3,
+          "tokenBudget": 300000,
+          "maxAccessLevel": "read"
+        },
+        "blueprints": [],
+        "teamLimits": {
+          "maxDelegations": 30,
+          "callTimeoutMinutes": 30,
+          "runTokenBudget": 2000000
+        }
+      },
+      {
+        "id": "researcher",
+        "agentId": "ytRsrch1",
+        "agentIds": [
+          "ytRsrch1"
+        ],
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "researcher",
+        "role": "Finds hot AI/no-code topics (topic scouting) and builds sourced fact packs for a chosen topic. Read-only, uses the web.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      },
+      {
+        "id": "writer",
+        "agentId": "ytWritr1",
+        "agentIds": [
+          "ytWritr1"
+        ],
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "writer",
+        "role": "Writes Shorts or long-form scripts from a brief and fact pack, following SCRIPT_GUIDE.md when present; saves the final version to video-script/<slug>.md.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      },
+      {
+        "id": "editor",
+        "agentId": "ytEditr1",
+        "agentIds": [
+          "ytEditr1"
+        ],
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "editor",
+        "role": "Checks a script against the handbook and the fact pack, spot-checks sources, answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      }
+    ],
+    "edges": []
+  },
+  {
+    "id": "ytVideo1",
+    "name": "YouTube video builder",
+    "description": "Dựng video trong repo Remotion từ kịch bản nêu trong ô chat (tên file, slug hoặc mô tả) và public/voiceover/<slug>.mp3: timing, ảnh agy khi cần, dựng, QA, render.",
+    "type": "team",
+    "isolation": {
+      "enabled": false,
+      "testCommand": "",
+      "keepOnFailure": true
+    },
+    "inputs": [],
+    "limits": {
+      "timeoutMin": 0,
+      "tokenBudget": 0
+    },
+    "schedules": [],
+    "team": {
+      "coordinator": {
+        "agentId": "vdProd01",
+        "process": "## Read the request\nEverything comes from the user's chat message; there are no separate input fields.\n- Which script: a file path, a file name, a slug, or a description (\"the Claude desktop video\", \"the latest script\"). Find it with Glob in video-script/ first, then scripts/. A description matches against file names and the first heading of each script.\n  - Exactly one match: use it.\n  - Several matches: take the most recently modified one and say so in the report.\n  - No match: stop and report the scripts that exist (newest first, at most 10), so the user can name one in the next message.\n- Slug: the script's file name without folders and without .md.\n- Render: yes, unless the message says not to render (for example \"không render\", \"chưa render\", \"no render\", \"preview only\").\n- Anything else in the message (style wishes, scenes to change) goes to the builder as user notes.\n\n## Files for this video\n- Script: the file found above\n- Voice-over: public/voiceover/<slug>.mp3\n- Composition id: the PascalCase form of the slug\n- Format: a Short when the script targets 60 seconds or less, otherwise long-form. For long-form, DESIGN.md section 13 and the 40 to 50 second target do not apply; follow the script's own structure and the general rules in DESIGN.md.\n\n## Steps\n0. Check the files with Glob before anything else.\n   - Script missing: stop and report.\n   - Voice-over missing: stop and report that the owner must record it from the script's \"Voiceover cho ElevenLabs\" section and copy it to public/voiceover/<slug>.mp3. Never build on estimated timings.\n   - src/videos/<slug>/ already exists: this is an update run. Skip Build, send the script and the requested changes from the user's request to builder as a Fix, then continue at QA.\n1. Timing: builder, work item \"timing\". Check the reported duration against the script's target (40 to 50 seconds for a Short, the script's own target for long-form) and note it if it is outside.\n2. Images (only when they help):\n   a. builder, work item \"asset-plan\": get the list of images the video needs.\n   b. If the list is empty, skip to Build. Otherwise send the whole list to artist, work item \"assets\", with the style notes from the script's \"Giao diện\" line.\n   c. If artist fails (provider unavailable, quota, or the image tool is refused), do not retry with another agent: tell builder in the Build brief to draw those parts in code.\n3. Build: builder, work item \"build\". Include the list of delivered image paths. Brief it with the slug, the composition id, the script path, the beats it must anchor to, and any user notes from the request.\n4. QA: qa, work item \"qa\", reviewing \"build\" (use reviewOf when the tool offers it). Pass the composition id, slug and the builder's report.\n5. Fix: on VERDICT: CHANGES_REQUESTED, send code issues to builder under work item \"build\" and image issues to artist under work item \"assets\" (then tell builder which files changed), then run QA again. At most 2 fix rounds; after that keep the current version and flag it for the owner.\n6. Render: only if the request did not say not to render, and QA passed (or the video was flagged after 2 rounds): builder, work item \"render\".\n\n## Rules\n- One builder at a time: never run two builder work items in parallel. Artist and builder may not work at the same time on the same files.\n- Do not spawn agents.\n- Never use an em dash.\n\n## Final report (in Vietnamese)\n- slug, composition id, thời lượng\n- kết quả QA và số vòng sửa, các frame đã xem, đường dẫn contact sheet\n- đường dẫn file mp4 (nếu đã render)\n- ảnh đã tạo bằng agy (đường dẫn) và phần nào phải vẽ bằng code thay ảnh\n- việc chủ kênh cần tự kiểm tra: âm thanh và nhạc, các mục QA đánh dấu, các giả định\n- nhắc: duyệt bản review của run để đưa code vào repo\n"
+      },
+      "members": [
+        {
+          "alias": "builder",
+          "agentIds": [
+            "vdBuild1"
+          ],
+          "role": "Builds the Short in the Remotion repo: word timestamps and beats.ts (timing), the composition (build), fixes from QA (fix), and the final mp4 (render). Runs lint, stills and the contact sheet itself."
+        },
+        {
+          "alias": "qa",
+          "agentIds": [
+            "vdQa0001"
+          ],
+          "role": "Checks a built Short against DESIGN.md sections 7, 10 and 13 by rendering and viewing stills and the contact sheet; answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED. Never edits code."
+        },
+        {
+          "alias": "artist",
+          "agentIds": [
+            "vdArt001"
+          ],
+          "role": "Generates raster images (hero objects, backdrops, textures, cover subject) with agy's image model and saves each at the exact path it is given. No text, logos or real people in images. Cannot run shell commands."
+        }
+      ],
+      "spawnPolicy": {
+        "enabled": true,
+        "providers": [
+          "claude",
+          "gemini"
+        ],
+        "claudeModels": [
+          "sonnet",
+          "claude-haiku-4-5-20251001"
+        ],
+        "codexModels": [],
+        "geminiModels": [
+          "gemini-3.8-flash-medium",
+          "gemini-3.8-flash-low",
+          "claude-opus-5-5-low",
+          "claude-sonnet-5-5-low",
+          "claude-opus-5-5-high",
+          "claude-sonnet-5-5-medium",
+          "claude-sonnet-5-5-high",
+          "claude-opus-5-5-medium"
+        ],
+        "maxAgents": 3,
+        "tokenBudget": 300000,
+        "maxAccessLevel": "read"
+      },
+      "blueprints": [],
+      "limits": {
+        "maxDelegations": 12,
+        "callTimeoutMinutes": 60,
+        "runTokenBudget": 4000000
+      }
+    },
+    "nodes": [
+      {
+        "id": "coordinator",
+        "agentId": "vdProd01",
+        "promptTemplate": "## Read the request\nEverything comes from the user's chat message; there are no separate input fields.\n- Which script: a file path, a file name, a slug, or a description (\"the Claude desktop video\", \"the latest script\"). Find it with Glob in video-script/ first, then scripts/. A description matches against file names and the first heading of each script.\n  - Exactly one match: use it.\n  - Several matches: take the most recently modified one and say so in the report.\n  - No match: stop and report the scripts that exist (newest first, at most 10), so the user can name one in the next message.\n- Slug: the script's file name without folders and without .md.\n- Render: yes, unless the message says not to render (for example \"không render\", \"chưa render\", \"no render\", \"preview only\").\n- Anything else in the message (style wishes, scenes to change) goes to the builder as user notes.\n\n## Files for this video\n- Script: the file found above\n- Voice-over: public/voiceover/<slug>.mp3\n- Composition id: the PascalCase form of the slug\n- Format: a Short when the script targets 60 seconds or less, otherwise long-form. For long-form, DESIGN.md section 13 and the 40 to 50 second target do not apply; follow the script's own structure and the general rules in DESIGN.md.\n\n## Steps\n0. Check the files with Glob before anything else.\n   - Script missing: stop and report.\n   - Voice-over missing: stop and report that the owner must record it from the script's \"Voiceover cho ElevenLabs\" section and copy it to public/voiceover/<slug>.mp3. Never build on estimated timings.\n   - src/videos/<slug>/ already exists: this is an update run. Skip Build, send the script and the requested changes from the user's request to builder as a Fix, then continue at QA.\n1. Timing: builder, work item \"timing\". Check the reported duration against the script's target (40 to 50 seconds for a Short, the script's own target for long-form) and note it if it is outside.\n2. Images (only when they help):\n   a. builder, work item \"asset-plan\": get the list of images the video needs.\n   b. If the list is empty, skip to Build. Otherwise send the whole list to artist, work item \"assets\", with the style notes from the script's \"Giao diện\" line.\n   c. If artist fails (provider unavailable, quota, or the image tool is refused), do not retry with another agent: tell builder in the Build brief to draw those parts in code.\n3. Build: builder, work item \"build\". Include the list of delivered image paths. Brief it with the slug, the composition id, the script path, the beats it must anchor to, and any user notes from the request.\n4. QA: qa, work item \"qa\", reviewing \"build\" (use reviewOf when the tool offers it). Pass the composition id, slug and the builder's report.\n5. Fix: on VERDICT: CHANGES_REQUESTED, send code issues to builder under work item \"build\" and image issues to artist under work item \"assets\" (then tell builder which files changed), then run QA again. At most 2 fix rounds; after that keep the current version and flag it for the owner.\n6. Render: only if the request did not say not to render, and QA passed (or the video was flagged after 2 rounds): builder, work item \"render\".\n\n## Rules\n- One builder at a time: never run two builder work items in parallel. Artist and builder may not work at the same time on the same files.\n- Do not spawn agents.\n- Never use an em dash.\n\n## Final report (in Vietnamese)\n- slug, composition id, thời lượng\n- kết quả QA và số vòng sửa, các frame đã xem, đường dẫn contact sheet\n- đường dẫn file mp4 (nếu đã render)\n- ảnh đã tạo bằng agy (đường dẫn) và phần nào phải vẽ bằng code thay ảnh\n- việc chủ kênh cần tự kiểm tra: âm thanh và nhạc, các mục QA đánh dấu, các giả định\n- nhắc: duyệt bản review của run để đưa code vào repo\n",
+        "kind": "agent",
+        "teamRole": "coordinator",
+        "calleeNodeIds": [
+          "builder",
+          "qa",
+          "artist"
+        ],
+        "autoStart": true,
+        "spawnPolicy": {
+          "enabled": true,
+          "providers": [
+            "claude",
+            "gemini"
+          ],
+          "claudeModels": [
+            "sonnet",
+            "claude-haiku-4-5-20251001"
+          ],
+          "codexModels": [],
+          "geminiModels": [
+            "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-low",
+            "claude-opus-5-5-low",
+            "claude-sonnet-5-5-low",
+            "claude-opus-5-5-high",
+            "claude-sonnet-5-5-medium",
+            "claude-sonnet-5-5-high",
+            "claude-opus-5-5-medium"
+          ],
+          "maxAgents": 3,
+          "tokenBudget": 300000,
+          "maxAccessLevel": "read"
+        },
+        "blueprints": [],
+        "teamLimits": {
+          "maxDelegations": 12,
+          "callTimeoutMinutes": 60,
+          "runTokenBudget": 4000000
+        }
+      },
+      {
+        "id": "builder",
+        "agentId": "vdBuild1",
+        "agentIds": [
+          "vdBuild1"
+        ],
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "builder",
+        "role": "Builds the Short in the Remotion repo: word timestamps and beats.ts (timing), the composition (build), fixes from QA (fix), and the final mp4 (render). Runs lint, stills and the contact sheet itself.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      },
+      {
+        "id": "qa",
+        "agentId": "vdQa0001",
+        "agentIds": [
+          "vdQa0001"
+        ],
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "qa",
+        "role": "Checks a built Short against DESIGN.md sections 7, 10 and 13 by rendering and viewing stills and the contact sheet; answers VERDICT: PASS or VERDICT: CHANGES_REQUESTED. Never edits code.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      },
+      {
+        "id": "artist",
+        "agentId": "vdArt001",
+        "agentIds": [
+          "vdArt001"
+        ],
+        "promptTemplate": "",
+        "kind": "agent",
+        "teamRole": "member",
+        "alias": "artist",
+        "role": "Generates raster images (hero objects, backdrops, textures, cover subject) with agy's image model and saves each at the exact path it is given. No text, logos or real people in images. Cannot run shell commands.",
+        "calleeNodeIds": [],
+        "autoStart": false
+      }
+    ],
+    "edges": []
+  }
+]

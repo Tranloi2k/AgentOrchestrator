@@ -7,6 +7,7 @@ import path from "node:path";
 import { nanoid } from "nanoid";
 import { normalizeWorkflowInput, validateWorkflow } from "./workflow-model.js";
 import { listAgents } from "../agents/agents.store.js";
+import { listSkills } from "../skills/skills.store.js";
 import { SERVER_DIR, loadJson } from "../../core/config.js";
 
 const WORKFLOWS_FILE = path.join(SERVER_DIR, "workflows.config.json");
@@ -40,7 +41,10 @@ class WorkflowValidationError extends Error {
 }
 
 function checkWorkflow(input) {
-  const errors = validateWorkflow(input, { agentExists: (id) => listAgents().some((a) => a.id === id) });
+  const errors = validateWorkflow(input, {
+    agentExists: (id) => listAgents().some((a) => a.id === id),
+    skillExists: (id) => listSkills().some((s) => s.id === id),
+  });
   if (errors.length) throw new WorkflowValidationError(errors);
 }
 

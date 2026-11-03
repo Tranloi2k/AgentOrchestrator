@@ -36,12 +36,12 @@ export function register(app) {
   /** The `spawn_agent` tool. The caller is identified by its bridge session id alone; policy,
    * depth and cwd come from the server's own record of that session. */
   app.post("/api/internal/spawn-agent", requireInternalToken, async (req, res) => {
-    const { sessionId, provider, model, tools, accessLevel, prompt, title } = req.body || {};
+    const { sessionId, provider, model, tools, accessLevel, prompt, title, blueprint, workItemId } = req.body || {};
     if (!sessionId || !prompt) {
       return res.status(400).json({ error: "thiếu sessionId/prompt" });
     }
     try {
-      res.json(await spawnAgent({ sessionId, provider, model, tools, accessLevel, prompt: String(prompt), title }));
+      res.json(await spawnAgent({ sessionId, provider, model, tools, accessLevel, prompt: String(prompt), title, blueprint, workItemId }));
     } catch (err) {
       res.status(409).json({ error: err.message });
     }

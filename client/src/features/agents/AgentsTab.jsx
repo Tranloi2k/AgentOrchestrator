@@ -14,6 +14,8 @@ export default function AgentsTab() {
   const [workflows, setWorkflows] = useState([]);
   const [confirmTarget, setConfirmTarget] = useState(null);
   const [duplicateTarget, setDuplicateTarget] = useState(null);
+  // What the server said when it refused a delete the list above didn't predict.
+  const [deleteError, setDeleteError] = useState("");
   const [providerAvailability, setProviderAvailability] = useState({ claude: true, codex: true, gemini: true });
 
   function refresh() {
@@ -28,15 +30,31 @@ export default function AgentsTab() {
     refresh();
   }, []);
 
+  // Same rule as the server (workflowAgentIds): a team member's backups and a Pipeline step's
+  // fallbacks are in use too, not only each node's main agent.
   function usedByWorkflows(agentId) {
-    return workflows.filter((w) => w.nodes?.some((n) => n.agentId === agentId)).map((w) => w.name);
+    const uses = (w) =>
+      (w.nodes || []).some((n) => n.agentId === agentId || n.agentIds?.includes(agentId) || n.fallbackAgentIds?.includes(agentId)) ||
+      w.team?.coordinator?.agentId === agentId ||
+      (w.team?.members || []).some((m) => m.agentId === agentId || m.agentIds?.includes(agentId));
+    return workflows.filter(uses).map((w) => w.name);
+  }
+
+  // The workflow list is re-read each time, so a workflow edited in another tab is counted.
+  function askDelete(agent) {
+    api.listWorkflows().then((d) => setWorkflows(d.workflows));
+    setConfirmTarget(agent);
   }
 
   async function confirmDelete() {
     const agent = confirmTarget;
     setConfirmTarget(null);
     if (!agent) return;
-    await api.deleteAgent(agent.id);
+    try {
+      await api.deleteAgent(agent.id);
+    } catch (err) {
+      setDeleteError(t("agents.deleteFailed", { name: agent.name, error: err.message }));
+    }
     refresh();
   }
 
@@ -102,7 +120,7 @@ export default function AgentsTab() {
               <Button variant="secondary" onClick={() => setDuplicateTarget(a)}>
                 {t("common.duplicate")}
               </Button>
-              <Button variant="secondary" color="danger" onClick={() => setConfirmTarget(a)}>
+              <Button variant="secondary" color="danger" onClick={() => askDelete(a)}>
                 {t("common.delete")}
               </Button>
             </FormActions>
@@ -118,6 +136,16 @@ export default function AgentsTab() {
           reason={isBlocked ? t("agents.deleteBlocked", { name: confirmTarget.name, names: blockedNames.join(", ") }) : ""}
           onConfirm={confirmDelete}
           onClose={() => setConfirmTarget(null)}
+        />
+      )}
+
+      {deleteError && (
+        <ConfirmModal
+          title={t("common.delete")}
+          blocked
+          reason={deleteError}
+          onConfirm={() => setDeleteError("")}
+          onClose={() => setDeleteError("")}
         />
       )}
 

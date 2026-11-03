@@ -39,7 +39,7 @@ function setup(members, script = [], { unavailable = [], limits = null } = {}) {
     const next = script.shift();
     return next ? next(opts) : { ok: true, resultText: `answer ${calls.length}`, usage: null, sessionId: `${opts.agent.provider}-session-${calls.length}` };
   };
-  const { askAgent } = createTeamCalls({
+  const { askAgent, spawnBlueprint } = createTeamCalls({
     runs: new Map([[run.id, run]]),
     getAgent: (id) => AGENTS[id] || Object.values(AGENTS)[0], // like the real one: falls back to the first agent
     agentForNode: (node) => AGENTS[node.agentId],
@@ -57,7 +57,7 @@ function setup(members, script = [], { unavailable = [], limits = null } = {}) {
   });
   const ask = (targetNodeId, question, workItemId = "feature", extra = {}) =>
     askAgent({ runId: run.id, workflowId: "wf1", callerNodeId: "coordinator", targetNodeId, question, workItemId, cwd: "/repo", depth: 0, ...extra });
-  return { run, calls, ask, clock, killed };
+  return { run, calls, ask, clock, killed, spawnBlueprint };
 }
 
 const quota = (quotaResetAt = null) => () => ({ ok: false, resultText: "", usage: { inputTokens: 1 }, failureReason: "quota", quotaResetAt });
@@ -232,6 +232,92 @@ test("an ordinary agent error does not fail over", async () => {
   assert.equal(calls.length, 1);
   assert.equal(reply.ok, false);
   assert.equal(reply.failureReason, "agent_error");
+});
+
+for (const reason of ["tool_denied", "no_output"]) {
+  test(`${reason}: a member with [agy, claude] moves to Claude in the same call, without a cooldown`, async () => {
+    const fails = () => ({ ok: false, resultText: "", usage: { inputTokens: 2 }, failureReason: reason });
+    const { run, calls, ask } = setup({ painter: ["agyDev", "claudeDev"] }, [fails]);
+    const reply = await ask("painter", "Make the logo");
+
+    assert.deepEqual(calls.map((c) => c.agent.id), ["agyDev", "claudeDev"]);
+    assert.equal(reply.ok, true);
+    assert.equal(reply.agent.id, "claudeDev");
+    assert.equal(run.delegations.length, 1, "one call from the coordinator");
+    assert.equal(run.delegations[0].agentId, "claudeDev");
+    assert.equal(run.providerCooldowns?.gemini, undefined, "the same provider may still work for another job");
+    assert.deepEqual(
+      run.tasks[0].fallbackLog.map((e) => [e.provider, e.outcome]),
+      [["gemini", reason], ["claude", "done"]]
+    );
+    assert.ok(run.tasks[0].log.some((l) => l.includes("không làm được việc này") && l.includes(`[${reason}]`)), "the reason is logged in plain words");
+
+    await ask("painter", "Make the banner", "banner", { parentWorkItemId: "root" });
+    assert.equal(calls.at(-1).agent.id, "agyDev", "a new job starts on agy again");
+  });
+}
+
+for (const [label, answer] of [
+  ["a CAPABILITY_UNAVAILABLE line", () => ({ ok: true, resultText: "CAPABILITY_UNAVAILABLE: image generation\nCould draw an SVG instead.", usage: null, sessionId: "agy-1" })],
+  ["a capability_unavailable failure", () => ({ ok: false, resultText: "Image generation is not available", usage: null, failureReason: "capability_unavailable" })],
+]) {
+  test(`${label}: no provider switch, the agent's answer goes back to the coordinator`, async () => {
+    const { run, calls, ask } = setup({ painter: ["agyDev", "claudeDev"] }, [answer]);
+    const reply = await ask("painter", "Make the logo");
+
+    assert.match(calls[0].prompt, /CAPABILITY_UNAVAILABLE/, "a member is told how to say it has no tool");
+    assert.equal(calls.length, 1, "Claude is not tried: the coordinator decides");
+    assert.equal(reply.ok, false);
+    assert.equal(reply.failureReason, "capability_unavailable");
+    assert.equal(reply.answer, run.tasks[0].resultText);
+    assert.ok(reply.answer.length > 0, "the stopped agent's answer is what the coordinator gets");
+    assert.equal(reply.agent.id, "agyDev");
+    assert.equal(run.providerCooldowns?.gemini, undefined);
+    assert.ok(run.tasks[0].log.some((l) => l.includes("điều phối viên quyết định")));
+  });
+}
+
+test("after capability_unavailable the coordinator may hand the same work item to another member", async () => {
+  const noTool = () => ({ ok: true, resultText: "CAPABILITY_UNAVAILABLE: image generation", usage: null });
+  const { calls, ask } = setup({ painter: "agyDev", designer: "claudeDev" }, [noTool]);
+  await ask("painter", "Make the logo");
+  const reply = await ask("designer", "Make the logo as an SVG");
+  assert.equal(reply.ok, true);
+  assert.equal(calls[1].agent.id, "claudeDev");
+});
+
+test("a resumed fix round is not told about CAPABILITY_UNAVAILABLE again", async () => {
+  const { calls, ask } = setup({ dev: "claudeDev" });
+  await ask("dev", "Build the login form");
+  await ask("dev", "Fix it");
+  assert.match(calls[0].prompt, /CAPABILITY_UNAVAILABLE/);
+  assert.equal(calls[1].prompt, "Fix it");
+});
+
+test("a job-level failure on the last agent ends the call with that reason", async () => {
+  const denied = () => ({ ok: false, resultText: "", usage: null, failureReason: "tool_denied" });
+  const { run, ask } = setup({ painter: ["agyDev", "claudeDev"] }, [denied, denied]);
+  const reply = await ask("painter", "Make the logo");
+  assert.equal(reply.ok, false);
+  assert.equal(reply.failureReason, "tool_denied");
+  assert.equal(run.delegations[0].failureReason, "tool_denied");
+});
+
+test("an ordinary agent error on agy still does not move to Claude", async () => {
+  const { run, calls, ask } = setup({ painter: ["agyDev", "claudeDev"] }, [() => ({ ok: false, resultText: "", usage: null, failureReason: "agent_error" })]);
+  const reply = await ask("painter", "Make the logo");
+  assert.equal(calls.length, 1);
+  assert.equal(reply.failureReason, "agent_error");
+  assert.deepEqual(run.tasks[0].fallbackLog.map((e) => e.outcome), ["agent_error"]);
+});
+
+test("a resumed session that is denied a tool fails over instead of retrying the same agent", async () => {
+  const denied = () => ({ ok: false, resultText: "", usage: null, failureReason: "tool_denied" });
+  const { calls, ask } = setup({ painter: ["agyDev", "claudeDev"] }, [undefined, denied]);
+  await ask("painter", "Make the logo");
+  await ask("painter", "Make it blue");
+  assert.equal(calls[1].resume, "gemini-session-1");
+  assert.deepEqual(calls.slice(1).map((c) => [c.agent.id, c.resume]), [["agyDev", "gemini-session-1"], ["claudeDev", null]]);
 });
 
 test("the coordinator's delegation rules still apply across members", async () => {
@@ -441,4 +527,236 @@ test("spawn_agent's check only looks at the token budget, and the Run tab gets u
 
   assert.deepEqual(teamLimitSummary(run), { delegations: 1, tokens: 1000, maxDelegations: 1, callTimeoutMinutes: 30, runTokenBudget: 1000 });
   assert.equal(teamLimitSummary({ ...run, workflowType: "pipeline" }), null);
+});
+
+/** --------------------------- spawn_agent with a blueprint --------------------------- */
+
+const PAINTER = {
+  name: "painter",
+  role: "Makes the images the job needs",
+  instructions: "You make images.",
+  skillIds: ["brand"],
+  accessLevel: "write",
+  providers: [
+    { provider: "gemini", model: "", instructions: "Generate a PNG bitmap." },
+    { provider: "claude", model: "sonnet", instructions: "You cannot make bitmaps: draw an SVG instead." },
+  ],
+  tools: null,
+};
+const WRITER = { name: "writer", role: "Writes copy", instructions: "You write.", skillIds: [], accessLevel: "read", providers: [{ provider: "claude", model: "", instructions: "" }], tools: null };
+
+/** A team run whose coordinator may spawn the given blueprints, plus a spawn helper. */
+function spawnSetup(script = [], { blueprints = [PAINTER, WRITER], maxAgents = 5, unavailable = [], supervisorLevel = "write", members = { dev: "claudeDev" } } = {}) {
+  const t = setup(members, script, { unavailable });
+  const supervisor = {
+    ...AGENTS.claudeDev,
+    accessLevel: supervisorLevel,
+    allowedTools: ["Read", "Edit", "Write"],
+    spawnPolicy: { enabled: true, providers: [], maxAgents, tokenBudget: 0 },
+    blueprints,
+  };
+  const spawn = (blueprint, prompt, workItemId = "logo", extra = {}) =>
+    t.spawnBlueprint({ runId: t.run.id, callerNodeId: "coordinator", callerTaskId: null, supervisor, blueprint, prompt, workItemId, cwd: "/repo", depth: 0, ...extra });
+  return { ...t, spawn, supervisor };
+}
+
+const fails = (failureReason) => () => ({ ok: false, resultText: "", usage: null, failureReason });
+
+test("blueprint: walks its providers, skipping a missing CLI, and says who did the work", async () => {
+  const { run, calls, spawn } = spawnSetup([], { unavailable: ["gemini"] });
+  const reply = await spawn("painter", "Make the logo");
+
+  assert.equal(calls.length, 1, "agy is not installed: skipped without a process");
+  assert.equal(calls[0].agent.provider, "claude");
+  assert.equal(reply.ok, true);
+  assert.equal(reply.agent.provider, "claude");
+  assert.equal(reply.blueprint, "painter");
+  const task = run.tasks.find((x) => x.kind === "agent-spawn");
+  assert.equal(task.spawn.provider, "claude");
+  assert.deepEqual(task.fallbackLog.map((e) => [e.provider, e.outcome]), [["gemini", "skipped:provider_unavailable"], ["claude", "done"]]);
+});
+
+test("blueprint: a failover reason on one provider moves the same call to the next, and reports why", async () => {
+  for (const reason of ["tool_denied", "no_output", "quota"]) {
+    const { run, calls, spawn } = spawnSetup([fails(reason)]);
+    const reply = await spawn("painter", "Make the logo");
+    assert.deepEqual(calls.map((c) => c.agent.provider), ["gemini", "claude"], reason);
+    assert.equal(reply.ok, true);
+    assert.deepEqual(reply.stopped.map((s) => [s.provider, s.reason]), [["gemini", reason]]);
+    assert.equal(!!run.providerCooldowns?.gemini, reason === "quota", "only quota sidelines the provider");
+  }
+});
+
+test("blueprint: a missing capability also moves on (the next provider has its own instructions), with the answer kept", async () => {
+  const noTool = () => ({ ok: true, resultText: "CAPABILITY_UNAVAILABLE: image generation", usage: null });
+  const { calls, spawn } = spawnSetup([noTool]);
+  const reply = await spawn("painter", "Make the logo");
+  assert.deepEqual(calls.map((c) => c.agent.provider), ["gemini", "claude"]);
+  assert.equal(reply.ok, true);
+  assert.equal(reply.stopped[0].reason, "capability_unavailable");
+  assert.match(reply.stopped[0].answer, /image generation/);
+});
+
+test("blueprint: an ordinary error does not move to the next provider", async () => {
+  const { calls, spawn } = spawnSetup([fails("agent_error")]);
+  const reply = await spawn("painter", "Make the logo");
+  assert.equal(calls.length, 1);
+  assert.equal(reply.ok, false);
+  assert.equal(reply.failureReason, "agent_error");
+});
+
+test("blueprint: instructions, skills and access come from the blueprint; per-provider instructions only for that provider", async () => {
+  const { calls, spawn } = spawnSetup([fails("tool_denied")]);
+  await spawn("painter", "Make the logo");
+  const [agy, claude] = calls.map((c) => c.agent);
+  assert.equal(agy.appendSystemPrompt, "You make images.\n\nGenerate a PNG bitmap.");
+  assert.equal(claude.appendSystemPrompt, "You make images.\n\nYou cannot make bitmaps: draw an SVG instead.");
+  assert.deepEqual(agy.skillIds, ["brand"]);
+  assert.equal(claude.model, "sonnet");
+  assert.equal(agy.accessLevel, "write");
+  assert.equal(agy.agyMode, "accept-edits");
+  assert.equal(claude.permissionMode, "acceptEdits");
+  assert.deepEqual(claude.allowedTools, ["Read", "Edit", "Write"], "the supervisor's tools when the blueprint sets none");
+  assert.match(calls[0].prompt, /painter/, "a fresh start gets its role");
+  assert.match(calls[0].prompt, /Make the logo/);
+});
+
+test("blueprint: a fix round with the same workItemId resumes the session on the provider that did the work", async () => {
+  const { run, calls, spawn } = spawnSetup([fails("tool_denied")]);
+  await spawn("painter", "Make the logo");
+  await spawn("painter", "Make it blue");
+
+  assert.deepEqual(calls.map((c) => c.agent.provider), ["gemini", "claude", "claude"], "sticks to Claude for this work item");
+  assert.equal(calls[2].resume, "claude-session-2");
+  assert.equal(calls[2].prompt, "Make it blue", "a resumed session only gets the new message");
+  const tasks = run.tasks.filter((x) => x.kind === "agent-spawn");
+  assert.equal(tasks[1].continuation, "resumed");
+
+  await spawn("painter", "Make the banner", "banner");
+  assert.equal(calls.at(-1).agent.provider, "gemini", "a new work item starts from the first provider again");
+  assert.equal(calls.at(-1).resume, null);
+});
+
+test("blueprint: maxAgents counts distinct work items, not fix rounds or provider switches", async () => {
+  const { spawn } = spawnSetup([fails("tool_denied")], { maxAgents: 2 });
+  await spawn("painter", "Make the logo", "logo"); // two providers tried: still one agent
+  await spawn("painter", "Make it blue", "logo"); // fix round
+  const second = await spawn("writer", "Write the tagline", "tagline");
+  assert.equal(second.usage.spawned, 2);
+  await assert.rejects(() => spawn("painter", "Make the banner", "banner"), /Đã tạo đủ 2 agent/);
+  const again = await spawn("writer", "Shorter, please", "tagline");
+  assert.equal(again.ok, true, "a known work item can still get another round at the limit");
+});
+
+test("blueprint: a resumed coordinator gets a finished spawn replayed, without a process", async () => {
+  const { run, calls, spawn } = spawnSetup();
+  await spawn("painter", "Make the logo");
+  beginAttempt(run);
+  const reply = await spawn("painter", "Make the logo");
+  assert.equal(calls.length, 1, "nothing is spawned again");
+  assert.equal(reply.ok, true);
+  assert.equal(reply.replayed, true);
+  assert.equal(reply.answer, "answer 1");
+  const replayed = run.tasks.filter((x) => x.kind === "agent-spawn").at(-1);
+  assert.equal(replayed.continuation, "replayed");
+  assert.equal(reply.usage.spawned, 1, "a replay is not a new agent");
+
+  await spawn("painter", "Make it blue");
+  assert.equal(calls[1].resume, "gemini-session-1", "a later fix round still continues the original session");
+});
+
+test("blueprint: unknown name, missing workItemId and access above the supervisor are refused before anything runs", async () => {
+  const { run, calls, spawn } = spawnSetup([], { supervisorLevel: "read" });
+  await assert.rejects(() => spawn("ghost", "x"), /Không có blueprint "ghost"/);
+  await assert.rejects(() => spawn("painter", "x", ""), /cần workItemId/);
+  await assert.rejects(() => spawn("painter", "x"), /vượt quá quyền tối đa/);
+  assert.equal(calls.length, 0);
+  assert.equal(run.tasks.length, 0);
+  assert.equal((run.delegations || []).length, 0);
+});
+
+test("blueprint spawns leave the ask_agent rules alone and are not counted as hand-offs", async () => {
+  const { run, spawn, ask } = spawnSetup();
+  await spawn("painter", "Make the logo", "logo");
+  const reply = await ask("dev", "Build the login form", "feature");
+  assert.equal(reply.ok, true, "the first ask_agent work item needs no parent because of a spawn");
+  run.workflowNodes[0].teamLimits = { maxDelegations: 30, callTimeoutMinutes: 30, runTokenBudget: 0 };
+  assert.equal(teamLimitSummary(run).delegations, 1);
+});
+
+/** --------------------------- the Team's access ceiling for spawns --------------------------- */
+
+test("ceiling: a read-only coordinator spawns a write blueprint under maxAccessLevel write", async () => {
+  const { calls, spawn, supervisor } = spawnSetup([], { supervisorLevel: "read" });
+  supervisor.allowedTools = ["Read", "Grep", "Glob"];
+  supervisor.spawnPolicy = { ...supervisor.spawnPolicy, maxAccessLevel: "write" };
+  const reply = await spawn("painter", "Make the logo");
+
+  assert.equal(reply.ok, true);
+  const agent = calls[0].agent;
+  assert.equal(agent.accessLevel, "write");
+  assert.equal(agent.agyMode, "accept-edits");
+  const claude = (await spawnClaude(supervisor)).agent;
+  assert.ok(claude.allowedTools.includes("Edit"), "write tools are available up to the Team's level, beyond the coordinator's own allowlist");
+  assert.ok(!claude.allowedTools.includes("Task"));
+});
+
+test("ceiling: the same request is refused under the default (read), before anything runs", async () => {
+  const { run, calls, spawn, supervisor } = spawnSetup([], { supervisorLevel: "read" });
+  supervisor.spawnPolicy = { ...supervisor.spawnPolicy, maxAccessLevel: "read" };
+  await assert.rejects(() => spawn("painter", "Make the logo"), /vượt quá quyền tối đa "read" mà Team cho phép/);
+  assert.equal(calls.length, 0);
+  assert.equal(run.tasks.length, 0);
+  const reply = await spawn("writer", "Write the tagline", "tagline");
+  assert.equal(reply.ok, true, "a read blueprint is still fine");
+});
+
+test("ceiling: a write coordinator can't hand out write when the Team keeps the default read", async () => {
+  const { spawn, supervisor } = spawnSetup([], { supervisorLevel: "write" });
+  supervisor.spawnPolicy = { ...supervisor.spawnPolicy, maxAccessLevel: "read" };
+  await assert.rejects(() => spawn("painter", "Make the logo"), /mà Team cho phép/);
+});
+
+/** A Claude-only write blueprint spawned once, to look at the tools it gets. */
+async function spawnClaude(supervisor) {
+  const t = setup({ dev: "claudeDev" });
+  const bp = { ...PAINTER, name: "svg", providers: [{ provider: "claude", model: "", instructions: "" }] };
+  const sup = { ...supervisor, blueprints: [bp] };
+  await t.spawnBlueprint({ runId: t.run.id, callerNodeId: "coordinator", supervisor: sup, blueprint: "svg", prompt: "x", workItemId: "x", cwd: "/repo", depth: 0 });
+  return t.calls[0];
+}
+
+/** --------------------------- a Team without fixed members --------------------------- */
+
+test("no members: the coordinator spawns two blueprints and gets both answers", async () => {
+  const answers = [
+    (opts) => ({ ok: true, resultText: `logo by ${opts.agent.provider}`, usage: null, sessionId: "agy-1" }),
+    (opts) => ({ ok: true, resultText: `tagline by ${opts.agent.provider}`, usage: null, sessionId: "claude-1" }),
+  ];
+  const { run, calls, spawn } = spawnSetup(answers, { members: {} });
+  assert.deepEqual(run.workflowNodes.map((n) => n.id), ["coordinator"], "nobody but the coordinator");
+
+  const [logo, tagline] = await Promise.all([spawn("painter", "Make the logo", "logo"), spawn("writer", "Write the tagline", "tagline")]);
+
+  assert.equal(logo.ok, true);
+  assert.equal(logo.answer, "logo by gemini");
+  assert.equal(logo.blueprint, "painter");
+  assert.equal(tagline.ok, true);
+  assert.equal(tagline.answer, "tagline by claude");
+  assert.equal(tagline.blueprint, "writer");
+  assert.equal(calls.length, 2);
+  assert.equal(tagline.usage.spawned, 2);
+  const spawned = run.tasks.filter((x) => x.kind === "agent-spawn");
+  assert.deepEqual(spawned.map((x) => [x.workItemId, x.status, x.spawn.blueprint]), [["logo", "done", "painter"], ["tagline", "done", "writer"]]);
+  assert.deepEqual(run.delegations.map((d) => [d.kind, d.targetNodeId, d.status]), [["spawn", "blueprint:painter", "done"], ["spawn", "blueprint:writer", "done"]]);
+});
+
+test("fixed members keep working next to blueprints, with their own agent fallback", async () => {
+  const { calls, ask, spawn } = spawnSetup([fails("tool_denied")], { members: { dev: ["agyDev", "claudeDev"] } });
+  const member = await ask("dev", "Build the login form", "feature");
+  assert.equal(member.ok, true);
+  assert.equal(member.agent.id, "claudeDev", "the member's agentIds fallback still runs");
+  const spawned = await spawn("writer", "Write the tagline", "tagline");
+  assert.equal(spawned.ok, true);
+  assert.deepEqual(calls.map((c) => c.agent.id), ["agyDev", "claudeDev", "blueprint:writer#0:claude"]);
 });

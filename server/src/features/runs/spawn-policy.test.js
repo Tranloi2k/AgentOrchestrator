@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildSpawnedAgent, checkSpawnLimits, spawnedTokens, normalizeSpawnPolicy } from "./spawn-policy.js";
+import { buildSpawnedAgent, buildBlueprintAgent, checkSpawnLimits, spawnedTokens, normalizeSpawnPolicy, normalizeBlueprints, spawnCeiling } from "./spawn-policy.js";
 import { KNOWN_TOOLS } from "../../core/config.js";
 
 const policy = normalizeSpawnPolicy({
@@ -11,6 +11,8 @@ const policy = normalizeSpawnPolicy({
   maxAgents: 2,
   tokenBudget: 1000,
 });
+// A policy without a Team ceiling (a run snapshot from before maxAccessLevel): capped by the supervisor.
+const outside = { ...policy, maxAccessLevel: undefined };
 const supervisor = { provider: "claude", accessLevel: "write", allowedTools: ["Read", "Grep", "Edit", "Task"] };
 
 test("provider must be on the whitelist, and is required when several are allowed", () => {
@@ -27,33 +29,34 @@ test("model must be the CLI default or on the provider's whitelist", () => {
 });
 
 test("a child's access level defaults to read and never exceeds the supervisor's", () => {
-  const read = buildSpawnedAgent(policy, supervisor, { provider: "codex" });
+  const read = buildSpawnedAgent(outside, supervisor, { provider: "codex" });
   assert.equal(read.accessLevel, "read");
   assert.equal(read.codexSandbox, "read-only");
-  const write = buildSpawnedAgent(policy, supervisor, { provider: "gemini", accessLevel: "write" });
+  const write = buildSpawnedAgent(outside, supervisor, { provider: "gemini", accessLevel: "write" });
   assert.equal(write.agyMode, "accept-edits");
-  assert.throws(() => buildSpawnedAgent(policy, supervisor, { provider: "codex", accessLevel: "full" }), /không được có quyền cao hơn/);
+  assert.throws(() => buildSpawnedAgent(outside, supervisor, { provider: "codex", accessLevel: "full" }), /quyền của điều phối viên/);
   assert.throws(
-    () => buildSpawnedAgent(policy, { ...supervisor, accessLevel: "read" }, { provider: "claude", accessLevel: "write" }),
-    /không được có quyền cao hơn/
+    () => buildSpawnedAgent(outside, { ...supervisor, accessLevel: "read" }, { provider: "claude", accessLevel: "write" }),
+    /quyền của điều phối viên/
   );
 });
 
 test("claude child tools stay inside the supervisor's allowlist and never include Task", () => {
-  const omitted = buildSpawnedAgent(policy, supervisor, { provider: "claude" });
-  assert.deepEqual(omitted.allowedTools, ["Read", "Grep", "Edit"], "Task is dropped from the ceiling");
-  assert.deepEqual(omitted.disallowedTools, KNOWN_TOOLS.filter((t) => !["Read", "Grep", "Edit"].includes(t)));
+  const omitted = buildSpawnedAgent(outside, supervisor, { provider: "claude" });
+  assert.deepEqual(omitted.allowedTools, ["Read", "Grep"], "Task is dropped from the ceiling, and a read child gets no write tool");
+  assert.deepEqual(omitted.disallowedTools, KNOWN_TOOLS.filter((t) => !["Read", "Grep"].includes(t)));
+  assert.deepEqual(buildSpawnedAgent(outside, supervisor, { provider: "claude", accessLevel: "write" }).allowedTools, ["Read", "Grep", "Edit"]);
   assert.equal(omitted.permissionMode, "default", "level read by default (write tools are blocked at spawn time)");
 
-  assert.throws(() => buildSpawnedAgent(policy, supervisor, { provider: "claude", tools: ["Bash"] }), /vượt quá quyền/);
-  assert.throws(() => buildSpawnedAgent(policy, supervisor, { provider: "claude", tools: ["Task"] }), /Task/);
+  assert.throws(() => buildSpawnedAgent(outside, supervisor, { provider: "claude", tools: ["Bash"] }), /vượt quá quyền/);
+  assert.throws(() => buildSpawnedAgent(outside, supervisor, { provider: "claude", tools: ["Task"] }), /Task/);
 
-  const none = buildSpawnedAgent(policy, supervisor, { provider: "claude", tools: [] });
+  const none = buildSpawnedAgent(outside, supervisor, { provider: "claude", tools: [] });
   assert.deepEqual(none.disallowedTools, KNOWN_TOOLS, "no tools chosen = every tool denied, not unrestricted");
 
   // a codex/agy supervisor has no Claude allowlist: its level decides
   const codexSup = { provider: "codex", accessLevel: "read" };
-  assert.deepEqual(buildSpawnedAgent(policy, codexSup, { provider: "claude" }).allowedTools, ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]);
+  assert.deepEqual(buildSpawnedAgent(outside, codexSup, { provider: "claude" }).allowedTools, ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]);
 });
 
 test("agent count includes running spawns; token budget counts finished ones", () => {
@@ -70,4 +73,54 @@ test("agent count includes running spawns; token budget counts finished ones", (
   assert.equal(spawnedTokens(budgetRun), 1000);
   assert.throws(() => checkSpawnLimits(budgetRun, { ...policy, maxAgents: 10 }), /ngân sách token/);
   assert.doesNotThrow(() => checkSpawnLimits(budgetRun, { ...policy, maxAgents: 10, tokenBudget: 0 }), "0 = no budget");
+});
+
+test("blueprints: normalized leniently, defaults to read, keeps provider order and per-provider instructions", () => {
+  const [b] = normalizeBlueprints([
+    { name: " Painter ", role: "Images", accessLevel: "root", providers: [{ provider: "gemini", instructions: "PNG" }, { provider: "claude", model: "sonnet" }, { provider: "" }], tools: ["Read", "Nope"] },
+  ]);
+  assert.equal(b.name, "painter");
+  assert.equal(b.accessLevel, "read");
+  assert.deepEqual(b.providers, [
+    { provider: "gemini", model: "", instructions: "PNG" },
+    { provider: "claude", model: "sonnet", instructions: "" },
+  ]);
+  assert.deepEqual(b.tools, ["Read"]);
+  assert.equal(normalizeBlueprints([{ name: "x", providers: [] }])[0].tools, null, "no list = everything the ceiling allows");
+  assert.deepEqual(normalizeBlueprints(undefined), []);
+});
+
+test("buildBlueprintAgent: capped by the supervisor, never the Task tool", () => {
+  const sup = { provider: "claude", accessLevel: "write", allowedTools: ["Read", "Edit"] };
+  const bp = normalizeBlueprints([{ name: "dev", accessLevel: "write", instructions: "Base", providers: [{ provider: "claude", instructions: "Extra" }] }])[0];
+  const agent = buildBlueprintAgent(sup, bp, bp.providers[0], 0);
+  assert.equal(agent.appendSystemPrompt, "Base\n\nExtra");
+  assert.deepEqual(agent.allowedTools, ["Read", "Edit"]);
+  assert.ok(agent.disallowedTools.includes("Bash"));
+  assert.throws(() => buildBlueprintAgent(sup, { ...bp, tools: ["Bash"] }, bp.providers[0], 0), /vượt quá quyền/);
+  assert.throws(() => buildBlueprintAgent(sup, { ...bp, tools: ["Task"] }, bp.providers[0], 0), /Task/);
+  assert.throws(() => buildBlueprintAgent({ ...sup, accessLevel: "read" }, bp, bp.providers[0], 0), /vượt quá quyền tối đa/);
+});
+
+test("spawnCeiling: a Team's maxAccessLevel caps spawns; without it the supervisor does", () => {
+  const readCoord = { provider: "claude", accessLevel: "read", allowedTools: ["Read", "Grep", "Glob"] };
+  assert.equal(normalizeSpawnPolicy({}).maxAccessLevel, "read", "default read");
+  assert.equal(normalizeSpawnPolicy({ maxAccessLevel: "root" }).maxAccessLevel, "read");
+
+  const same = spawnCeiling(normalizeSpawnPolicy({}), readCoord);
+  assert.deepEqual(same, { level: "read", tools: ["Read", "Grep", "Glob"], source: "team" }, "teams saved before: exactly the coordinator's tools, as before");
+
+  const raised = spawnCeiling(normalizeSpawnPolicy({ maxAccessLevel: "write" }), readCoord);
+  assert.equal(raised.level, "write");
+  assert.ok(raised.tools.includes("Edit") && raised.tools.includes("Write") && !raised.tools.includes("Task"));
+
+  const capped = spawnCeiling(normalizeSpawnPolicy({}), { provider: "claude", accessLevel: "write", allowedTools: ["Read", "Edit"] });
+  assert.deepEqual(capped, { level: "read", tools: ["Read"], source: "team" }, "a read ceiling never has write tools");
+
+  assert.equal(spawnCeiling({ enabled: true }, readCoord).source, "supervisor", "no Team ceiling: the supervisor's own");
+
+  const policyW = normalizeSpawnPolicy({ enabled: true, providers: ["claude"], maxAccessLevel: "write" });
+  assert.equal(buildSpawnedAgent(policyW, readCoord, { provider: "claude", accessLevel: "write" }).permissionMode, "acceptEdits");
+  assert.throws(() => buildSpawnedAgent({ ...policyW, maxAccessLevel: "read" }, readCoord, { provider: "claude", accessLevel: "write" }), /mà Team cho phép/);
+  assert.throws(() => buildSpawnedAgent(policyW, readCoord, { provider: "claude", accessLevel: "full" }), /vượt quá quyền tối đa "write"/);
 });

@@ -34,9 +34,10 @@ import {
 import { runAgentProcess, killRunProcesses, killTaskProcesses, getBridgeSession } from "./cli-runners.js";
 import { createTeamCalls, snapshotWorkflow, beginAttempt, coordinatorResumePlan, checkTeamLimits } from "./team-calls.js";
 import { addUsage, usageTokens, runTokens } from "./run-usage.js";
+import { FAILOVER_REASONS, describeFailure } from "./delegation-policy.js";
 
 /** ask_agent: see team-calls.js. */
-const { askAgent, completeWorkItem: completeTeamWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems } = createTeamCalls({
+const { askAgent, spawnBlueprint, completeWorkItem: completeTeamWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems } = createTeamCalls({
   runs,
   getAgent,
   agentForNode,
@@ -113,11 +114,18 @@ async function decomposePrompt({ runId, taskId, prompt, cwd }) {
  *
  * Limits: MAX_CALL_DEPTH here, maxAgents and tokenBudget per run in checkSpawnLimits, and the
  * supervisor's own access level and tools as the child's ceiling in buildSpawnedAgent.
+ *
+ * A call that names a `blueprint` goes to spawnBlueprint (team-calls.js): the team's role with
+ * its own instructions, skills and provider order, continued per workItemId. Without one, the
+ * ad-hoc spawn below runs exactly as before.
  */
-async function spawnAgent({ sessionId, provider, model, tools, accessLevel, prompt, title }) {
+async function spawnAgent({ sessionId, provider, model, tools, accessLevel, prompt, title, blueprint, workItemId }) {
   const session = getBridgeSession(sessionId);
   if (!session) throw new Error("Phiên agent-bridge không hợp lệ hoặc đã kết thúc.");
   const { runId, taskId: parentTaskId, agent: supervisor, depth, cwd } = session;
+  if (blueprint) {
+    return spawnBlueprint({ runId, callerNodeId: session.nodeId, callerTaskId: parentTaskId, supervisor, blueprint, prompt, title, workItemId, cwd, depth });
+  }
   const policy = supervisor?.spawnPolicy;
   if (!policy?.enabled) throw new Error("Chỉ điều phối viên của một Team có bật spawn_agent mới được tạo agent.");
 
@@ -418,10 +426,10 @@ function buildCoordinatorPrompt(process, originalPrompt) {
 ${originalPrompt}` : originalPrompt;
 }
 
-/** The same lookup as getAgent, plus a team's own spawn_agent setting for its coordinator. */
+/** The same lookup as getAgent, plus a team's own spawn_agent setting and blueprints for its coordinator. */
 function agentForNode(node) {
   const agent = getAgent(node.agentId);
-  return node.spawnPolicy ? { ...agent, spawnPolicy: node.spawnPolicy } : agent;
+  return node.spawnPolicy ? { ...agent, spawnPolicy: node.spawnPolicy, blueprints: node.blueprints || [] } : agent;
 }
 
 /** Opens the git-worktree review session for a run (see server/workspace.js), plus the
@@ -553,7 +561,10 @@ async function sleepUnlessStopped(runId, ms) {
   while (Date.now() < until && !isCancelling(runId)) await new Promise((r) => setTimeout(r, Math.min(500, until - Date.now())));
 }
 
-const FAILOVER_ON = ["quota", "provider_unavailable"];
+// A step's fallback agents take over on any reason that means "this provider can't do this job
+// here" (FAILOVER_REASONS). With no fallback left, retrying the same agent is pointless when a CLI
+// is missing, a tool is denied or a capability is missing: it would fail the same way.
+const NO_RETRY_ON = new Set(["provider_unavailable", "tool_denied", "capability_unavailable"]);
 
 async function executeGraph(run, workflow, workspace, keptDirs) {
   const { id: runId, prompt, cwd } = run;
@@ -704,7 +715,9 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
       if (resume && attempt === 1) {
         log("↩️ Tiếp tục phiên CLI của điều phối viên từ lần chạy bị gián đoạn.");
         result = await runAgentProcess({ ...base, prompt: resume.message, resume: resume.sessionId });
-        if (!result.ok && !result.resultText && !isCancelling(runId) && !FAILOVER_ON.includes(result.failureReason)) {
+        // As for team members: a broken session also ends in no_output, so that one still retries.
+        const providerProblem = FAILOVER_REASONS.has(result.failureReason) && result.failureReason !== "no_output";
+        if (!result.ok && !result.resultText && !isCancelling(runId) && !providerProblem) {
           log("⚠️ Không mở lại được phiên cũ, chạy lại kèm tóm tắt các việc đã xong.");
           task.usage = addUsage(task.usage, result.usage);
           nodeTokens.set(n.id, (nodeTokens.get(n.id) || 0) + usageTokens(result.usage));
@@ -728,13 +741,13 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
       if (isCancelling(runId)) return { ok: false, resultText: lastText, cancelled: true };
       task.failureReason = reason;
 
-      if (FAILOVER_ON.includes(reason) && ci + 1 < candidates.length) {
+      if (FAILOVER_REASONS.has(reason) && ci + 1 < candidates.length) {
         ci++;
         retriesLeft = n.retries || 0;
-        log(`🔀 ${agent.name} lỗi (${reason}) — chuyển sang agent dự phòng ${candidates[ci].name}.`);
+        log(`🔀 ${agent.name} lỗi: ${describeFailure(reason)} [${reason}]. Chuyển sang agent dự phòng ${candidates[ci].name}.`);
         continue;
       }
-      if (reason !== "provider_unavailable" && retriesLeft > 0) {
+      if (!NO_RETRY_ON.has(reason) && retriesLeft > 0) {
         retriesLeft--;
         const delay = (n.retryDelaySec ?? 10) * (n.retries - retriesLeft);
         log(`🔁 Lần thử ${attempt} thất bại (${reason}) — thử lại sau ${delay}s (còn ${retriesLeft} lần).`);

@@ -14,7 +14,8 @@ import treeKill from "tree-kill";
 import { classifyAgentFailure, parseQuotaReset } from "./delegation-policy.js";
 import { HOST, INTERNAL_TOKEN, isLoopbackHost } from "../../core/security.js";
 import { BRIDGE_SCRIPT, MAX_CALL_DEPTH, KNOWN_TOOLS, SUBAGENT_TOOL, SUBAGENT_SYSTEM_PROMPT, PROVIDER_AVAILABILITY, AGY_BIN } from "../../core/config.js";
-import { toolCeiling, claudeToolAccess } from "../agents/access.js";
+import { claudeToolAccess } from "../agents/access.js";
+import { spawnCeiling } from "./spawn-policy.js";
 import { getAgent } from "../agents/agents.store.js";
 import { getSkill } from "../skills/skills.store.js";
 import { getPlugin } from "../plugins/plugins.store.js";
@@ -155,12 +156,14 @@ function buildAgentBridgeContext(agent, node, workflow, { runId, taskId, cwd, de
           }))
       : [];
   const spawnPolicy = agent?.spawnPolicy?.enabled ? agent.spawnPolicy : null;
+  const ceiling = spawnPolicy ? spawnCeiling(spawnPolicy, agent) : null;
   if (!callable.length && !spawnPolicy) return null;
 
   const sessionId = randomBytes(16).toString("hex");
   bridgeSessions.set(sessionId, { runId, taskId, agent, depth, cwd, nodeId: node?.id || null });
   // A Team coordinator with isolation on merges its members' work items itself (complete_work_item).
-  const workItems = node?.teamRole === "coordinator" && !!workflow?.isolation?.enabled && callable.length > 0;
+  // Its blueprint spawns that write get work-item worktrees too, so a team without fixed members needs it as well.
+  const workItems = node?.teamRole === "coordinator" && !!workflow?.isolation?.enabled && (callable.length > 0 || (!!spawnPolicy && (agent.blueprints || []).length > 0));
 
   return {
     AGENT_BRIDGE_URL: `http://${bridgeHost()}:${process.env.PORT || 5175}`,
@@ -175,9 +178,21 @@ function buildAgentBridgeContext(agent, node, workflow, { runId, taskId, cwd, de
     AGENT_BRIDGE_CALLABLE: JSON.stringify(callable),
     AGENT_BRIDGE_WORK_ITEMS: workItems ? "1" : "",
     // Shown to the model in the tool description only; the server enforces the real policy,
-    // including the ceiling this supervisor puts on what it spawns (its own level and tools).
+    // including the ceiling on what it spawns (spawnCeiling: the Team's maxAccessLevel).
     AGENT_BRIDGE_SPAWN_POLICY: spawnPolicy
-      ? JSON.stringify({ ...spawnPolicy, maxAccessLevel: agent.accessLevel || "read", toolCeiling: toolCeiling(agent) })
+      ? JSON.stringify({
+          ...spawnPolicy,
+          maxAccessLevel: ceiling.level,
+          ceilingSource: ceiling.source,
+          toolCeiling: ceiling.tools,
+          // What the coordinator needs to pick one: the provider order is the server's to walk.
+          blueprints: (agent.blueprints || []).map((b) => ({
+            name: b.name,
+            role: b.role,
+            accessLevel: b.accessLevel,
+            providers: b.providers.map((p) => (p.model ? `${p.provider} (${p.model})` : p.provider)),
+          })),
+        })
       : "",
   };
 }
@@ -392,6 +407,11 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
     let quotaSignal = false;
     let quotaResetAt = null;
     let sessionId = null;
+    let gotResult = false;
+    let denials = 0;
+    // Tool errors from the stream (tool_result blocks marked is_error): where Claude says a tool
+    // was denied, which never reaches stderr.
+    let toolErrors = "";
     const startedAt = Date.now();
 
     const pushLog = (line) => pushTaskLog(runId, taskId, line);
@@ -417,8 +437,15 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
                 pushLog(`🔧 dùng tool: ${block.name} ${summarizeInput(block.input)}`);
               }
             }
+          } else if (evt.type === "user" && Array.isArray(evt.message?.content)) {
+            for (const block of evt.message.content) {
+              if (block.type === "tool_result" && block.is_error) toolErrors += `\n${toolResultText(block.content)}`;
+            }
           } else if (evt.type === "result") {
+            gotResult = true;
             resultText = evt.result || "";
+            denials = Array.isArray(evt.permission_denials) ? evt.permission_denials.length : 0;
+            for (const d of evt.permission_denials || []) pushLog(`⚠️ Claude đã chặn: ${d.tool_name || "?"} (chưa được cấp quyền)`);
             pushLog(`✅ Kết quả cuối:\n${resultText}`);
             // The final `result` event is the one place Claude reports what the whole turn
             // (all iterations, including any subagents) actually cost — token counts and
@@ -460,9 +487,15 @@ function runClaudeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, e
 
     child.on("close", (code) => {
       cleanup();
-      const failureReason = classifyAgentFailure({ exitCode: code, stderr: stderrText, resultText, quotaSignal });
+      // No result event at all, or one whose only outcome was denied tools: a failure, not an
+      // empty success, so a team member can move to its next provider.
+      const blocked = denials > 0 && !resultText.trim();
+      const ok = code === 0 && gotResult && !blocked;
+      const failureReason = ok
+        ? null
+        : classifyAgentFailure({ exitCode: code, stderr: `${stderrText}${toolErrors}`, resultText, quotaSignal, deniedSignal: blocked, noResult: !gotResult });
       resolve({
-        ok: code === 0,
+        ok,
         resultText,
         usage,
         sessionId,
@@ -560,6 +593,7 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent, node, workflow, de
     let buffer = "";
     let usage = null;
     let stderrText = "";
+    let toolErrors = ""; // errors of tool calls in the event stream (a cancelled MCP call, ...)
     const startedAt = Date.now();
 
     child.stdout.on("data", (chunk) => {
@@ -578,6 +612,7 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent, node, workflow, de
             usage = normalizeCodexUsage(evt, Date.now() - startedAt);
             continue;
           }
+          if (evt.item?.error) toolErrors += `\n${evt.item.error.message || JSON.stringify(evt.item.error)}`;
           const toolLine = describeCodexToolCall(evt);
           if (toolLine !== null) {
             if (toolLine) pushLog(toolLine);
@@ -625,9 +660,11 @@ function runCodexProcess({ runId, taskId, prompt, cwd, agent, node, workflow, de
         /* ignore */
       }
       if (resultText) pushLog(`✅ Kết quả cuối:\n${resultText}`);
-      const failureReason = classifyAgentFailure({ exitCode: code, stderr: stderrText, resultText });
+      // No final message is no answer, whatever the exit code says.
+      const ok = code === 0 && !!resultText;
+      const failureReason = ok ? null : classifyAgentFailure({ exitCode: code, stderr: `${stderrText}${toolErrors}`, resultText, noResult: !resultText });
       resolve({
-        ok: code === 0,
+        ok,
         resultText,
         usage,
         failureReason,
@@ -901,10 +938,15 @@ function runAgyProcess({ runId, taskId, prompt, cwd, agent, node, workflow, dept
       const resultText = String(result?.response || "").trim() || lastText;
       if (resultText) pushLog(`✅ Kết quả cuối:\n${resultText}`);
       // A run whose only output was blocked by a permission denial is a failure, not an empty success.
-      const blocked = !resultText && (result?.denied_actions || []).length > 0;
-      const ok = code === 0 && result?.status === "SUCCESS" && !blocked;
-      const errorText = `${stderrText}\n${result?.error || ""}`;
-      const failureReason = ok ? null : classifyAgentFailure({ exitCode: code || 1, stderr: errorText, resultText });
+      const denied = result?.denied_actions || [];
+      const blocked = !resultText && denied.length > 0;
+      // An empty SUCCESS is no answer either (no_output), so a member can move to its next provider.
+      const ok = code === 0 && result?.status === "SUCCESS" && !!resultText;
+      const deniedText = denied.map((d) => `requires the ${d.action} permission`).join("\n");
+      const errorText = `${stderrText}\n${result?.error || ""}\n${deniedText}`;
+      const failureReason = ok
+        ? null
+        : classifyAgentFailure({ exitCode: code || 1, stderr: errorText, resultText, deniedSignal: blocked, noResult: !resultText });
       resolve({
         ok,
         resultText,
@@ -937,6 +979,12 @@ function normalizeAgyUsage(result, wallDurationMs) {
 function quotaResetFor(failureReason, text, known = null) {
   if (failureReason !== "quota") return null;
   return known || parseQuotaReset(text);
+}
+
+/** The text of a Claude tool_result block's content (a string, or a list of text parts). */
+function toolResultText(content) {
+  if (typeof content === "string") return content;
+  return (Array.isArray(content) ? content : []).map((c) => c?.text || "").join("\n");
 }
 
 function summarizeInput(input) {

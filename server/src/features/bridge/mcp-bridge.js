@@ -22,6 +22,7 @@ import http from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { teamGuide } from "./team-guide.js";
 
 const BRIDGE_URL = process.env.AGENT_BRIDGE_URL || "http://127.0.0.1:5175";
 const BRIDGE_TOKEN = process.env.AGENT_BRIDGE_TOKEN || "";
@@ -43,6 +44,8 @@ const CALLABLE = parseJson(process.env.AGENT_BRIDGE_CALLABLE, []);
 const SPAWN_POLICY = parseJson(process.env.AGENT_BRIDGE_SPAWN_POLICY, null);
 // A Team coordinator with isolation on: each work item a member writes has its own worktree.
 const WORK_ITEMS = process.env.AGENT_BRIDGE_WORK_ITEMS === "1";
+// For a Team coordinator with blueprints: its fixed members and blueprints, and when to use which.
+const TEAM_GUIDE = teamGuide({ members: CALLABLE.filter((n) => n.member), blueprints: SPAWN_POLICY?.blueprints || [] });
 
 /**
  * POSTs JSON to the orchestrator server. Uses node:http rather than fetch on purpose: fetch
@@ -91,8 +94,8 @@ if (CALLABLE.length) {
   // agent each, so there the caller may still move a work item after a quota/CLI failure.
   const isMember = (id) => CALLABLE.some((n) => n.id === id && n.member);
   const ownershipRule = CALLABLE.every((n) => n.member)
-    ? "Không được giao cùng workItemId cho agent khác. Khi một thành viên hết quota hoặc CLI không khả dụng, hệ thống tự chuyển sang agent dự phòng của chính thành viên đó; bạn không cần và không nên tự chọn agent dự phòng. "
-    : "Không được giao cùng workItemId cho agent khác, trừ khi lần trước được hệ thống xác nhận thất bại vì hết quota/provider không khả dụng. ";
+    ? "Không được giao cùng workItemId cho agent khác. Khi agent của một thành viên không chạy được (hết quota, CLI không khả dụng, tool bị từ chối, không trả về kết quả), hệ thống tự chuyển sang agent dự phòng của chính thành viên đó; bạn không cần và không nên tự chọn agent dự phòng. Riêng khi agent báo không có tool cho việc được giao, câu trả lời của nó được trả về cho bạn quyết định. "
+    : "Không được giao cùng workItemId cho agent khác, trừ khi lần trước được hệ thống xác nhận thất bại vì provider không làm được việc (hết quota, CLI không khả dụng, tool bị từ chối, không trả về kết quả, không có tool phù hợp). ";
 
   server.registerTool(
     "ask_agent",
@@ -109,7 +112,8 @@ if (CALLABLE.length) {
             "Khi một công việc đã xong và review đạt, gọi complete_work_item để kiểm thử và gộp nó; cuối run, công việc nào review đạt mà chưa gộp sẽ được gộp tự động.\n\n"
           : "") +
         "Các agent bạn được phép hỏi:\n" +
-        callableList,
+        callableList +
+        (TEAM_GUIDE ? `\n\n${TEAM_GUIDE}` : ""),
       inputSchema: {
         agentId: z.string().describe("id chính xác của agent muốn hỏi, lấy từ danh sách ở trên"),
         question: z.string().describe("Câu hỏi / nhiệm vụ cụ thể muốn agent đó thực hiện và trả lời"),
@@ -138,7 +142,17 @@ if (CALLABLE.length) {
         if (!ok) return text(`Lỗi: ${data.error || `HTTP ${status}`}`, true);
         const by = data.agent ? `\n\n---\n(Thực hiện bởi agent ${data.agent.name} · ${data.agent.provider})` : "";
         if (!data.ok) {
-          const exhausted = ["quota", "provider_unavailable"].includes(data.failureReason);
+          // The reasons that let a work item move on (FAILOVER_REASONS in delegation-policy.js).
+          const exhausted = ["quota", "provider_unavailable", "tool_denied", "no_output", "capability_unavailable"].includes(data.failureReason);
+          if (data.failureReason === "capability_unavailable") {
+            return text(
+              "Agent không có tool cho việc này nên đã dừng, hệ thống KHÔNG tự chuyển provider. Câu trả lời của nó ở dưới. " +
+                `Bạn quyết định: giao cho thành viên khác (được dùng CÙNG workItemId="${workItemId}"), đổi yêu cầu sang cách làm được (vd SVG thay cho ảnh bitmap), hoặc ghi nhận trong báo cáo cuối.\n\n` +
+                (data.answer || "(không có câu trả lời)") +
+                by,
+              true
+            );
+          }
           const guidance = data.failureReason === "timeout"
             ? " Lần giao việc này vượt giới hạn thời gian của Team và agent đã bị dừng. Chia việc nhỏ hơn rồi giao lại cùng workItemId, hoặc ghi nhận phần chưa xong trong báo cáo cuối."
             : !exhausted
@@ -164,7 +178,7 @@ if (WORK_ITEMS) {
       title: "Gộp một công việc đã xong",
       description:
         "Báo một công việc (workItemId) đã xong: hệ thống chạy lệnh kiểm thử của workflow trong worktree của công việc đó rồi gộp vào nhánh của bạn. " +
-        "Chỉ gọi khi thành viên đã làm xong và review đạt. Nếu kiểm thử thất bại hoặc xung đột với việc đã gộp trước, công việc KHÔNG được gộp và bạn được báo lý do.",
+        "Chỉ gọi khi thành viên (hoặc agent tạo từ blueprint) đã làm xong và review đạt. Nếu kiểm thử thất bại hoặc xung đột với việc đã gộp trước, công việc KHÔNG được gộp và bạn được báo lý do.",
       inputSchema: {
         workItemId: z.string().min(1).max(80).describe("workItemId của công việc cần gộp"),
       },
@@ -186,43 +200,67 @@ if (SPAWN_POLICY) {
   const list = (items) => (items?.length ? items.join(", ") : "(không có)");
   const levels = ["read", "write", "full"];
   const allowedLevels = levels.slice(0, levels.indexOf(p.maxAccessLevel || "read") + 1);
+  const blueprints = p.blueprints || [];
+  // Ad-hoc spawns (pick provider/model/tools yourself) need the team's provider list.
+  const adHoc = (p.providers || []).length > 0;
   const policyText = [
-    `- provider: ${list(p.providers)}`,
-    p.providers?.includes("claude") && `- model Claude: mặc định của CLI (bỏ trống)${p.claudeModels?.length ? ", " + p.claudeModels.join(", ") : ""}`,
-    p.providers?.includes("codex") && `- model Codex: mặc định của CLI (bỏ trống)${p.codexModels?.length ? ", " + p.codexModels.join(", ") : ""}`,
-    p.providers?.includes("gemini") && `- model Gemini (agy): mặc định của CLI (bỏ trống)${p.geminiModels?.length ? ", " + p.geminiModels.join(", ") : ""}`,
-    `- accessLevel: ${allowedLevels.join(", ")} (read = chỉ đọc, write = sửa trong workspace, full = toàn quyền; bỏ trống = read; không vượt quá quyền của bạn)`,
-    p.providers?.includes("claude") && `- tool cho agent Claude: ${list(p.toolCeiling)} (bỏ trống "tools" = tất cả tool này; không bao giờ có Task)`,
-    `- tối đa ${p.maxAgents} agent cho cả run`,
+    adHoc && `- provider: ${list(p.providers)}`,
+    adHoc && p.providers.includes("claude") && `- model Claude: mặc định của CLI (bỏ trống)${p.claudeModels?.length ? ", " + p.claudeModels.join(", ") : ""}`,
+    adHoc && p.providers.includes("codex") && `- model Codex: mặc định của CLI (bỏ trống)${p.codexModels?.length ? ", " + p.codexModels.join(", ") : ""}`,
+    adHoc && p.providers.includes("gemini") && `- model Gemini (agy): mặc định của CLI (bỏ trống)${p.geminiModels?.length ? ", " + p.geminiModels.join(", ") : ""}`,
+    adHoc && `- accessLevel: ${allowedLevels.join(", ")} (read = chỉ đọc, write = sửa trong workspace, full = toàn quyền; bỏ trống = read; tối đa ${p.maxAccessLevel || "read"}${p.ceilingSource === "team" ? " theo cài đặt của Team" : ", quyền của bạn"})`,
+    adHoc && p.providers.includes("claude") && `- tool cho agent Claude: ${list(p.toolCeiling)} (bỏ trống "tools" = tất cả tool này; không bao giờ có Task)`,
+    `- tối đa ${p.maxAgents} agent cho cả run (mỗi workItemId của một blueprint tính là 1 agent, dù sửa bao nhiêu vòng)`,
     p.tokenBudget ? `- ngân sách ${p.tokenBudget} token (input + output + ghi cache) cho tất cả agent được tạo trong run` : null,
   ]
     .filter(Boolean)
     .join("\n");
-
   server.registerTool(
     "spawn_agent",
     {
       title: "Tạo một agent mới để giao việc",
       description:
-        "Tạo một agent MỚI (chọn provider, model, tool) để làm một phần việc, rồi CHỜ nhận kết quả của nó. " +
-        "Dùng khi việc có thể tách thành phần độc lập, hoặc khi phần việc hợp với một provider/model khác hơn. " +
+        "Tạo một agent MỚI để làm một phần việc, rồi CHỜ nhận kết quả của nó. " +
         "Agent mới KHÔNG thấy hội thoại của bạn: prompt phải tự đầy đủ bối cảnh, mục tiêu và nói rõ cần trả về gì. " +
         "Nhiều lời gọi có thể chạy song song. Không tạo agent cho việc nhỏ bạn tự làm nhanh hơn.\n\n" +
-        "Giới hạn được phép (hệ thống kiểm tra, ngoài danh sách sẽ bị từ chối):\n" +
+        (blueprints.length
+          ? "Cách ưu tiên: truyền blueprint (một vai trò Team đã định nghĩa sẵn, có hướng dẫn, skill, quyền và thứ tự provider riêng) cùng workItemId. " +
+            "Hệ thống tự chọn provider: bỏ qua provider chưa cài hoặc đang hết quota, và tự chuyển sang provider tiếp theo khi provider trước không làm được việc. " +
+            "Gọi lại với CÙNG blueprint và CÙNG workItemId để agent đó làm tiếp/sửa tiếp (nó nhớ các lần trước). Với blueprint, không truyền provider/model/tools/accessLevel.\n" +
+            `${TEAM_GUIDE}\n\n`
+          : "") +
+        (adHoc
+          ? blueprints.length
+            ? "Không có blueprint phù hợp thì có thể tự tạo agent (chọn provider, model, tool), trong giới hạn:\n"
+            : "Chọn provider, model, tool trong giới hạn được phép (hệ thống kiểm tra, ngoài danh sách sẽ bị từ chối):\n"
+          : "Chỉ được tạo agent từ các blueprint ở trên. Giới hạn:\n") +
         policyText,
       inputSchema: {
-        provider: z.string().optional().describe(`Provider của agent mới: ${list(p.providers)}. Bắt buộc nếu được phép nhiều hơn 1 provider.`),
-        model: z.string().optional().describe("Model, bỏ trống để dùng model mặc định của CLI"),
-        accessLevel: z.enum(["read", "write", "full"]).optional().describe("Mức truy cập của agent mới: read (mặc định), write hoặc full — không vượt quá mức của bạn. Cần sửa file thì truyền write."),
-        tools: z.array(z.string()).optional().describe("Chỉ cho Claude: danh sách tool, phải nằm trong danh sách được phép"),
+        ...(blueprints.length
+          ? {
+              blueprint: z.string().optional().describe(`Tên blueprint: ${blueprints.map((b) => b.name).join(", ")}`),
+              workItemId: z.string().min(1).max(80).optional().describe("Bắt buộc khi dùng blueprint: mã ổn định của công việc, giữ nguyên cho các lần làm tiếp/sửa tiếp"),
+            }
+          : {}),
+        ...(adHoc
+          ? {
+              provider: z.string().optional().describe(`Chỉ khi không dùng blueprint. Provider của agent mới: ${list(p.providers)}. Bắt buộc nếu được phép nhiều hơn 1 provider.`),
+              model: z.string().optional().describe("Chỉ khi không dùng blueprint. Model, bỏ trống để dùng model mặc định của CLI"),
+              accessLevel: z.enum(["read", "write", "full"]).optional().describe(`Chỉ khi không dùng blueprint. Mức truy cập: read (mặc định), write hoặc full, tối đa ${p.maxAccessLevel || "read"}. Cần sửa file thì truyền write.`),
+              tools: z.array(z.string()).optional().describe("Chỉ khi không dùng blueprint, chỉ cho Claude: danh sách tool, phải nằm trong danh sách được phép"),
+            }
+          : {}),
         title: z.string().max(80).optional().describe("Tên ngắn cho phần việc, hiện trên giao diện"),
         prompt: z.string().min(1).describe("Nhiệm vụ đầy đủ cho agent mới"),
       },
     },
-    async ({ provider, model, accessLevel, tools, title, prompt }) => {
+    async ({ blueprint, workItemId, provider, model, accessLevel, tools, title, prompt }) => {
+      if (!blueprint && !adHoc) return text(`Cần truyền blueprint: ${blueprints.map((b) => b.name).join(", ")}.`, true);
       try {
         const { ok, status, data } = await postJson("/api/internal/spawn-agent", {
           sessionId: SESSION_ID,
+          blueprint,
+          workItemId,
           provider,
           model,
           accessLevel,
@@ -233,8 +271,16 @@ if (SPAWN_POLICY) {
         if (!ok) return text(`Không tạo được agent: ${data.error || `HTTP ${status}`}`, true);
         const u = data.usage || {};
         const footer = `\n\n---\n(Đã tạo ${u.spawned}/${u.maxAgents} agent trong run này; agent con đã dùng ${u.tokensUsed}${u.tokenBudget ? "/" + u.tokenBudget : ""} token.)`;
-        if (!data.ok) return text(`Agent mới không hoàn thành (${data.failureReason || "agent_error"}).${data.answer ? "\n\n" + data.answer : ""}${footer}`, true);
-        return text((data.answer || "(agent mới không trả lời gì)") + footer);
+        // A blueprint spawn says which provider did the work and why earlier ones were left.
+        const by = data.agent ? `\n(Thực hiện bởi ${data.agent.name} · ${data.agent.provider})` : "";
+        const left = (data.stopped || [])
+          .map((s) => `- ${s.provider}: ${s.reason}${s.answer ? `. Trả lời: ${s.answer}` : ""}`)
+          .join("\n");
+        const leftText = left ? `\n(Provider đã bỏ qua:\n${left})` : "";
+        if (!data.ok) {
+          return text(`Agent mới không hoàn thành (${data.failureReason || "agent_error"}).${data.answer ? "\n\n" + data.answer : ""}${by}${leftText}${footer}`, true);
+        }
+        return text((data.answer || "(agent mới không trả lời gì)") + (data.replayed ? "\n(Kết quả đã lưu từ lần chạy trước.)" : "") + by + leftText + footer);
       } catch (err) {
         return text(`Lỗi kết nối agent-bridge: ${err.message}`, true);
       }

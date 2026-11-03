@@ -6,6 +6,7 @@ import path from "node:path";
 import { nanoid } from "nanoid";
 import { normalizeAccess } from "./access.js";
 import { listWorkflows } from "../workflows/workflows.store.js";
+import { workflowAgentIds } from "../workflows/workflow-model.js";
 import { SERVER_DIR, PROVIDERS, KNOWN_TOOLS, SUBAGENT_TOOL, loadJson } from "../../core/config.js";
 
 const AGENTS_FILE = path.join(SERVER_DIR, "agents.config.json");
@@ -100,7 +101,7 @@ function duplicateAgent(id) {
 
 function deleteAgent(id) {
   const usedByWorkflows = listWorkflows()
-    .filter((w) => w.nodes.some((n) => n.agentId === id || n.agentIds?.includes(id)))
+    .filter((w) => workflowAgentIds(w).has(id))
     .map((w) => w.name);
   if (usedByWorkflows.length) {
     throw new Error(

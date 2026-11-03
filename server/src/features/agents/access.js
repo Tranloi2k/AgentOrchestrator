@@ -36,10 +36,10 @@ const LEVEL_DEFAULTS = {
 };
 
 /** Tools that only read, used as the tool ceiling of a read-only agent that has no Claude allowlist. */
-const READ_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch"];
+export const READ_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch"];
 
 /** Claude tools that can change files or run anything; never available to a read-only agent. */
-const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash"];
+export const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash"];
 
 // Bumped when the meaning of stored access settings changes; older agents are migrated on load.
 const ACCESS_VERSION = 2;

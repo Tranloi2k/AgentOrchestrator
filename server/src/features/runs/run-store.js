@@ -174,6 +174,8 @@ function summarize(run, { includeReviewPatch = false } = {}) {
       userMessage: t.userMessage || null,
       turnId: t.turnId || null,
       spawn: t.spawn || null,
+      // Which agents/providers a call tried before one did the work (team members, spawns).
+      fallbackLog: t.fallbackLog || null,
       usage: t.usage || null,
     })),
   };

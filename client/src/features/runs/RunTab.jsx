@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../../shared/api.js";
 import WorkflowCanvas from "../workflows/WorkflowCanvas.jsx";
-import TeamDiagram, { teamFromNodes } from "../workflows/team/TeamDiagram.jsx";
+import TeamDiagram, { teamFromNodes, blueprintStatus } from "../workflows/team/TeamDiagram.jsx";
 import DirBrowserModal from "../../shared/components/DirBrowserModal.jsx";
 import { IconPlay, IconTrash, ProviderIcon } from "../../shared/Icons.jsx";
 import { usePreferences } from "../../app/PreferencesContext.jsx";
@@ -62,24 +62,67 @@ function spawnTokens(task) {
   return u ? (u.inputTokens || 0) + (u.outputTokens || 0) + (u.cacheCreationTokens || 0) : 0;
 }
 
+/** Spawned agents as the server's maxAgents counts them: a blueprint's work item once, an ad-hoc spawn per call. */
+function spawnedAgentCount(tasks) {
+  const keys = tasks.filter((x) => x.kind === "agent-spawn").map((x) => (x.spawn?.blueprint && x.workItemId ? `${x.spawn.blueprint}|${x.workItemId}` : x.id));
+  return new Set(keys).size;
+}
+
 /** One line under a spawned agent's title: what it runs on, what it may use, who created it. */
 function SpawnMeta({ task, parentTitle }) {
   const { t } = usePreferences();
   const s = task.spawn;
   const level = t(`agents.access.${s.accessLevel || "read"}`);
   const access =
-    s.provider !== "claude"
+    s.provider !== "claude" || s.blueprint
       ? level
       : `${level} · ${s.tools?.length ? t("run.spawn.tools", { tools: s.tools.join(", ") }) : t("run.spawn.noTools")}`;
+  // A blueprint spawn shows its role, then the provider that actually ran (or the order it will try).
+  const provider = s.provider || (s.blueprint ? null : "claude");
   return (
     <div className="task-spawn-meta">
-      <ProviderIcon provider={s.provider} size={13} title={t(`agents.provider.${s.provider}`)} />
-      <span>{s.model || t("run.spawn.defaultModel")}</span>
+      {s.blueprint && <span>🧬 {t("run.spawn.blueprint", { name: s.blueprint })}{task.workItemId ? ` [${task.workItemId}]` : ""} ·</span>}
+      {provider ? (
+        <>
+          <ProviderIcon provider={provider} size={13} title={t(`agents.provider.${provider}`)} />
+          <span>{s.blueprint ? t(`agents.provider.${provider}`) : ""} {s.model || t("run.spawn.defaultModel")}</span>
+        </>
+      ) : (
+        <span>{t("run.spawn.providerOrder", { providers: (s.providers || []).map((x) => t(`agents.provider.${x}`)).join(" → ") })}</span>
+      )}
       <span>· {access}</span>
       {parentTitle && <span>· {t("run.spawn.by", { name: parentTitle })}</span>}
       {task.usage && <span>· {t("run.spawn.tokens", { count: spawnTokens(task).toLocaleString() })}</span>}
     </div>
   );
+}
+
+/** What an outcome on task.fallbackLog means, for its tooltip: "done", a failure reason, or "skipped:<reason>". */
+const outcomeReason = (outcome) => (outcome.startsWith("skipped:") ? outcome.slice(8) : outcome);
+
+/**
+ * The agents or providers a call left before one did the work (task.fallbackLog, set by the
+ * server for team members and blueprint spawns), as one line: "agy: tool_denied, switched to
+ * Claude". Hidden when the first one did it.
+ */
+function FallbackLine({ task }) {
+  const { t } = usePreferences();
+  const log = task.fallbackLog || [];
+  if (!log.some((e) => e.outcome !== "done")) return null;
+  // A blueprint's entries differ by provider; a member's by agent (two may share a provider).
+  const name = (e) => (task.spawn?.blueprint ? t(`agents.provider.${e.provider}`) : e.agentName || t(`agents.provider.${e.provider}`));
+  const parts = log.map((e, i) => {
+    if (e.outcome === "done") return null;
+    const reason = outcomeReason(e.outcome);
+    const next = log.slice(i + 1).find((x) => !x.outcome.startsWith("skipped:"));
+    const key = e.outcome.startsWith("skipped:") ? "run.fallback.skipped" : next ? "run.fallback.switched" : "run.fallback.failed";
+    return (
+      <span key={i} title={t(`run.failure.${reason}`)}>
+        {t(key, { from: name(e), reason, to: next ? name(next) : "" })}
+      </span>
+    );
+  });
+  return <div className="task-fallback">🔀 {parts.filter(Boolean).reduce((acc, part, i) => (i ? [...acc, "; ", part] : [part]), [])}</div>;
 }
 
 const TaskCard = React.memo(function TaskCard({ task, parentTitle, onDeleteTurn }) {
@@ -169,6 +212,7 @@ const TaskCard = React.memo(function TaskCard({ task, parentTitle, onDeleteTurn 
         )}
       </div>
       {task.spawn && <SpawnMeta task={task} parentTitle={parentTitle} />}
+      <FallbackLine task={task} />
       {open && (
         <div className="task-log" ref={logRef} onScroll={handleLogScroll}>
           {hiddenLogCount > 0 && (
@@ -209,7 +253,7 @@ function SpawnSummary({ tasks }) {
     <div className="run-spawn-summary">
       🧬{" "}
       {t("run.spawn.summary", {
-        count: spawned.length,
+        count: spawnedAgentCount(tasks),
         max: limits.maxAgents ?? "?",
         tokens: tokens.toLocaleString(),
         budget: limits.tokenBudget ? limits.tokenBudget.toLocaleString() : "∞",
@@ -995,7 +1039,8 @@ export default function RunTab({ view = "history" }) {
                         agents={agents}
                         compact
                         statusOf={(nodeId) => latestTaskForNode(selectedRun.tasks, nodeId)?.status}
-                        spawnCount={selectedRun.tasks.filter((task) => task.kind === "agent-spawn").length}
+                        spawnCount={spawnedAgentCount(selectedRun.tasks)}
+                        blueprintStatusOf={(name) => blueprintStatus(selectedRun.tasks, name)}
                       />
                     ) : (
                     <WorkflowCanvas

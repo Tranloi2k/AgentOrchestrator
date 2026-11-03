@@ -14,6 +14,9 @@ import { usePreferences } from "../../../app/PreferencesContext.jsx";
  *   members:     [{ key, alias, agentId, role }]
  *   spawn:       { enabled, providers } | null
  *   spawnCount:  agents spawned so far in a run (optional)
+ *   blueprints:  [{ key, name, role, accessLevel, providers: [{ provider }] }]: roles the
+ *                coordinator may spawn; in a run, `blueprintStatusOf(name)` gives
+ *                { status, provider } of its latest spawned agent
  */
 export default function TeamDiagram({
   coordinator,
@@ -26,6 +29,10 @@ export default function TeamDiagram({
   onSelect,
   onAddMember,
   addLabel,
+  blueprints = [],
+  blueprintStatusOf,
+  onAddBlueprint,
+  addBlueprintLabel,
   hint = null,
   compact = false,
 }) {
@@ -69,7 +76,7 @@ export default function TeamDiagram({
         subtitle: coordinator.subtitle ?? t("workflows.team.coordinatorShort"),
         status: statusOf?.("coordinator"),
       })}
-      {(members.length > 0 || showSpawn || onAddMember) && (
+      {(members.length > 0 || showSpawn || onAddMember || blueprints.length > 0) && (
         <>
           <div className="team-diagram-stem" />
           <div className="team-members">
@@ -107,6 +114,31 @@ export default function TeamDiagram({
                 })}
               </div>
             )}
+            {(blueprints.length > 0 || onAddBlueprint) && <div className="team-blueprints-label">{t("workflows.blueprint.section")}</div>}
+            {blueprints.map((b) => {
+              const live = blueprintStatusOf?.(b.name);
+              const first = live?.provider || b.providers?.[0]?.provider || "claude";
+              return (
+                <div key={b.key} className="team-member-slot">
+                  {card(b.key, {
+                    icon: <ProviderIcon provider={first} size={16} />,
+                    title: b.name || t("workflows.blueprint.unnamed"),
+                    subtitle: live?.provider
+                      ? t("workflows.blueprint.ranOn", { provider: t(`agents.provider.${live.provider}`) })
+                      : b.role || (b.providers || []).map((p) => t(`agents.provider.${p.provider}`)).join(" → "),
+                    status: live?.status,
+                    className: `team-node-blueprint ${interactive && (!b.name || !b.role || !b.providers?.length) ? "team-node-incomplete" : ""}`,
+                  })}
+                </div>
+              );
+            })}
+            {onAddBlueprint && (
+              <div className="team-member-slot">
+                <button type="button" className="team-node team-node-add" onClick={onAddBlueprint}>
+                  {addBlueprintLabel}
+                </button>
+              </div>
+            )}
           </div>
         </>
       )}
@@ -122,5 +154,15 @@ export function teamFromNodes(nodes) {
     coordinator: { agentId: coord.agentId },
     members: nodes.filter((n) => n.teamRole === "member").map((n) => ({ key: n.id, alias: n.alias, agentId: n.agentId, role: n.role })),
     spawn: coord.spawnPolicy || null,
+    blueprints: (coord.blueprints || []).map((b) => ({ key: `bp:${b.name}`, ...b })),
   };
+}
+
+/**
+ * For a run's TeamDiagram: a blueprint's latest spawned agent, as { status, provider } (the
+ * provider that actually ran, once known), or undefined when it wasn't spawned.
+ */
+export function blueprintStatus(tasks, name) {
+  const task = tasks.filter((x) => x.kind === "agent-spawn" && x.spawn?.blueprint === name).at(-1);
+  return task ? { status: task.status, provider: task.spawn?.provider || null } : undefined;
 }

@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyAgentFailure, finishDelegation, parseQuotaReset, reserveDelegation } from "./delegation-policy.js";
+import {
+  COOLDOWN_REASONS,
+  FAILOVER_REASONS,
+  classifyAgentFailure,
+  describeFailure,
+  finishDelegation,
+  parseCapabilityMarker,
+  parseQuotaReset,
+  reserveDelegation,
+} from "./delegation-policy.js";
 
 const base = (overrides = {}) => ({
   callerNodeId: "pm",
@@ -77,6 +86,43 @@ test("failure classifier only unlocks failover for quota or unavailable provider
   assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "Memory limit exceeded" }), "agent_error");
   assert.equal(classifyAgentFailure({ providerAvailable: false }), "provider_unavailable");
   assert.equal(classifyAgentFailure({ exitCode: 0 }), null);
+});
+
+test("failures that mean 'this provider cannot do this job here' get their own reasons", () => {
+  // The real agy case: a read_file on a PNG, auto-denied in headless mode.
+  const agy = "no output produced: a tool required the read_file permission that headless mode cannot prompt for";
+  assert.equal(classifyAgentFailure({ exitCode: 1, stderr: agy, noResult: true }), "tool_denied");
+  assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "view_file was auto-denied" }), "tool_denied");
+  assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "Claude requested permissions to use Write, but you haven't granted it yet." }), "tool_denied");
+  assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "user cancelled MCP tool call" }), "tool_denied");
+  assert.equal(classifyAgentFailure({ exitCode: 0, deniedSignal: true }), "tool_denied", "denied tools and no answer, even with exit 0");
+
+  assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "Image generation is not available in this environment" }), "capability_unavailable");
+  assert.equal(classifyAgentFailure({ exitCode: 1, resultText: "I cannot generate images here." }), "capability_unavailable");
+
+  assert.equal(classifyAgentFailure({ exitCode: 0, noResult: true }), "no_output", "exit 0 without a result message is no answer");
+  assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "", noResult: true }), "no_output");
+  assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "TypeError: x is undefined", noResult: true }), "agent_error", "a crash that printed an error stays an ordinary error");
+  assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "EACCES: permission denied, open 'a.txt'" }), "agent_error", "the OS refusing a file is the task's problem");
+  assert.equal(classifyAgentFailure({ exitCode: 1, stderr: "usage limit reached", noResult: true }), "quota", "quota still wins");
+});
+
+test("only provider-level reasons go on cooldown; all of them allow failover", () => {
+  for (const r of ["quota", "provider_unavailable"]) assert.ok(COOLDOWN_REASONS.has(r) && FAILOVER_REASONS.has(r));
+  for (const r of ["tool_denied", "no_output", "capability_unavailable"]) assert.ok(!COOLDOWN_REASONS.has(r) && FAILOVER_REASONS.has(r));
+  for (const r of ["agent_error", "timeout", "cancelled"]) assert.ok(!FAILOVER_REASONS.has(r));
+  assert.match(describeFailure("tool_denied"), /từ chối/);
+  assert.equal(parseCapabilityMarker("CAPABILITY_UNAVAILABLE: image generation"), "image generation");
+  assert.equal(parseCapabilityMarker("Done.\n**CAPABILITY_UNAVAILABLE: bitmap output**"), "bitmap output");
+  assert.equal(parseCapabilityMarker("All good"), null);
+});
+
+test("a work item may move to another member after a job-level failure too", () => {
+  const run = {};
+  const base = { callerNodeId: "coordinator", workItemId: "logo", question: "Draw the logo" };
+  const first = reserveDelegation(run, { ...base, targetNodeId: "painter", assignmentId: "a1" });
+  finishDelegation(first, { ok: false, failureReason: "tool_denied" });
+  assert.doesNotThrow(() => reserveDelegation(run, { ...base, targetNodeId: "designer", assignmentId: "a2" }));
 });
 
 test("quota reset times are read off the providers' error text", () => {

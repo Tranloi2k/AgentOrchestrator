@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeWorkflowInput, validateWorkflow, pickRoute, routeInstruction, COORDINATOR_NODE_ID } from "./workflow-model.js";
+import { normalizeWorkflowInput, validateWorkflow, pickRoute, routeInstruction, COORDINATOR_NODE_ID, workflowAgentIds } from "./workflow-model.js";
 
 const agentExists = (id) => ["a1", "a2", "a3"].includes(id);
 const codes = (input) => validateWorkflow(input, { agentExists }).map((e) => e.code);
@@ -91,11 +91,30 @@ test("team validation", () => {
     assert.ok(bad.includes(c), c);
   }
   assert.ok(codes({ type: "team", team: { coordinator: { agentId: "a1" }, members: [] } }).includes("teamEmpty"));
-  assert.deepEqual(
-    codes({ type: "team", team: { coordinator: { agentId: "a1" }, members: [], spawnPolicy: { enabled: true, providers: ["claude"] } } }),
-    [],
-    "a coordinator that only spawns needs no members"
+  assert.ok(
+    codes({ type: "team", team: { coordinator: { agentId: "a1" }, members: [], spawnPolicy: { enabled: true, providers: ["claude"] } } }).includes("teamEmpty"),
+    "without members, spawning needs at least one blueprint"
   );
+  const blueprint = { name: "dev", role: "Builds it", providers: [{ provider: "claude" }] };
+  assert.deepEqual(
+    codes({ type: "team", team: { coordinator: { agentId: "a1" }, members: [], spawnPolicy: { enabled: true }, blueprints: [blueprint] } }),
+    [],
+    "a coordinator that only spawns blueprints needs no members"
+  );
+  assert.ok(
+    codes({ type: "team", team: { coordinator: { agentId: "a1" }, members: [], spawnPolicy: { enabled: false }, blueprints: [blueprint] } }).includes("teamEmpty"),
+    "blueprints with spawning off don't count"
+  );
+});
+
+test("a team without members runs as a coordinator alone, carrying its blueprints", () => {
+  const wf = normalizeWorkflowInput({
+    type: "team",
+    team: { coordinator: { agentId: "a1" }, members: [], spawnPolicy: { enabled: true }, blueprints: [{ name: "dev", role: "Builds it", providers: [{ provider: "claude" }] }] },
+  });
+  assert.equal(wf.nodes.length, 1);
+  assert.deepEqual(wf.nodes[0].calleeNodeIds, []);
+  assert.equal(wf.nodes[0].blueprints[0].name, "dev");
 });
 
 test("router picks by the exact ROUTE label only", () => {
@@ -186,4 +205,44 @@ test("team limits: safe defaults for teams saved without them, carried on the co
     team: { coordinator: { agentId: "a1" }, members: [], limits: { maxDelegations: "5", callTimeoutMinutes: 0, runTokenBudget: 0 } },
   });
   assert.deepEqual(custom.team.limits, { maxDelegations: 5, callTimeoutMinutes: 1, runTokenBudget: 0 }, "0 tokens = no limit; a timeout is at least a minute");
+});
+
+test("workflowAgentIds: main agents, team backups and pipeline fallbacks all count as in use", () => {
+  const pipeline = normalizeWorkflowInput({
+    nodes: [{ id: "a", agentId: "main", fallbackAgentIds: ["fb1", "fb2"] }],
+    edges: [],
+  });
+  assert.deepEqual([...workflowAgentIds(pipeline)].sort(), ["fb1", "fb2", "main"]);
+
+  const team = normalizeWorkflowInput({
+    type: "team",
+    team: { coordinator: { agentId: "lead" }, members: [{ alias: "dev", agentIds: ["agy", "claude"], role: "dev" }] },
+  });
+  assert.deepEqual([...workflowAgentIds(team)].sort(), ["agy", "claude", "lead"]);
+  assert.equal(workflowAgentIds(team).has("other"), false);
+});
+
+test("blueprints are validated on save against the Team's ceiling, providers and skills", () => {
+  const team = (blueprint, spawnPolicy = {}) => ({
+    type: "team",
+    team: {
+      coordinator: { agentId: "a1" },
+      members: [],
+      spawnPolicy: { enabled: true, ...spawnPolicy },
+      blueprints: [{ name: "painter", role: "Images", accessLevel: "read", providers: [{ provider: "claude" }], ...blueprint }],
+    },
+  });
+  const check = (input) => validateWorkflow(input, { agentExists, skillExists: (id) => id === "s1" }).map((e) => e.code);
+
+  assert.deepEqual(check(team({})), [], "a read blueprint under the default ceiling is fine, with no ad-hoc providers");
+  assert.ok(check(team({ accessLevel: "write" })).includes("blueprintAccessTooHigh"), "default ceiling is read");
+  assert.deepEqual(check(team({ accessLevel: "write" }, { maxAccessLevel: "write" })), []);
+  assert.ok(check(team({ accessLevel: "full" }, { maxAccessLevel: "write" })).includes("blueprintAccessTooHigh"));
+  assert.ok(check(team({ providers: [] })).includes("blueprintNoProviders"));
+  assert.ok(check(team({ providers: [{ provider: "gpt9" }] })).includes("blueprintUnknownProvider"));
+  assert.ok(check(team({ skillIds: ["s1", "gone"] })).includes("blueprintUnknownSkill"));
+  assert.ok(check(team({ tools: ["Read", "Task"] })).includes("blueprintTaskTool"));
+  assert.ok(check(team({ tools: ["Read", "Edit"] })).includes("blueprintWriteToolsReadOnly"));
+  assert.ok(check(team({ name: "Bad Name!" })).includes("blueprintNameInvalid"));
+  assert.ok(check(team({ role: "" })).includes("blueprintNoRole"));
 });

@@ -6,6 +6,7 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { nanoid } from "nanoid";
 import { listAgents } from "../agents/agents.store.js";
+import { listWorkflows } from "../workflows/workflows.store.js";
 import { SERVER_DIR, loadJson } from "../../core/config.js";
 
 const SKILLS_FILE = path.join(SERVER_DIR, "skills.config.json");
@@ -51,6 +52,11 @@ function deleteSkill(id) {
   const usedByAgents = listAgents().filter((a) => a.skillIds?.includes(id)).map((a) => a.name);
   if (usedByAgents.length) {
     throw new Error(`Skill đang được dùng bởi agent: ${usedByAgents.join(", ")}. Gỡ khỏi (các) agent đó trước rồi mới xoá.`);
+  }
+  // A Team's blueprints carry skills too; deleting one would leave the blueprint pointing at nothing.
+  const usedByTeams = listWorkflows().filter((w) => (w.team?.blueprints || []).some((b) => b.skillIds?.includes(id))).map((w) => w.name);
+  if (usedByTeams.length) {
+    throw new Error(`Skill đang được dùng bởi blueprint trong workflow: ${usedByTeams.join(", ")}. Gỡ khỏi (các) blueprint đó trước rồi mới xoá.`);
   }
   const before = SKILLS.length;
   SKILLS = SKILLS.filter((s) => s.id !== id);

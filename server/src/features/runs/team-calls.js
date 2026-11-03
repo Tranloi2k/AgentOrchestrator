@@ -23,8 +23,19 @@
  * so the flow can be tested with a fake runner and without the stores or any real CLI.
  */
 import { createHash } from "node:crypto";
-import { FAILOVER_REASONS, finishDelegation, questionFingerprint, reserveDelegation } from "./delegation-policy.js";
+import {
+  CAPABILITY_INSTRUCTION,
+  COOLDOWN_REASONS,
+  FAILOVER_REASONS,
+  HANDED_BACK_REASONS,
+  describeFailure,
+  finishDelegation,
+  parseCapabilityMarker,
+  questionFingerprint,
+  reserveDelegation,
+} from "./delegation-policy.js";
 import { addUsage, runTokens } from "./run-usage.js";
+import { blueprintSpawnKey, buildBlueprintAgent, checkSpawnLimits, spawnedCount, spawnedTokens } from "./spawn-policy.js";
 import { openItemWorktree, integrateWorktree } from "../workspace/workspace.js";
 
 /** Providers whose CLI can continue an earlier session: claude --resume, agy --conversation. */
@@ -50,7 +61,12 @@ export function snapshotWorkflow(run) {
  */
 export function previousAttempt(run, record) {
   const earlier = (run.delegations || []).filter(
-    (d) => d !== record && d.callerNodeId === record.callerNodeId && d.workItemId === record.workItemId && d.status !== "running"
+    (d) =>
+      d !== record &&
+      d.callerNodeId === record.callerNodeId &&
+      d.workItemId === record.workItemId &&
+      (d.kind || "ask") === (record.kind || "ask") &&
+      d.status !== "running"
   );
   const last = earlier.at(-1);
   if (!last || last.targetNodeId !== record.targetNodeId || !last.agentId || last.agentId !== record.agentId) return null;
@@ -78,9 +94,15 @@ export function continuationPlan(previous, previousTask, { provider, cwd }) {
   return transcript ? { mode: "transcript", transcript } : { mode: "fresh", transcript: null };
 }
 
-/** What a member receives on a fresh start: its role in the team, then the request. */
+/**
+ * What a member receives on a fresh start: its role in the team, then the request, then how to
+ * say it has no tool for the job (that answer goes back to the coordinator, see
+ * HANDED_BACK_REASONS). A resumed session already has both.
+ */
 function memberPrompt(node, question) {
-  return node.role ? `Vai trò của bạn trong team (${node.alias}): ${node.role}\n\n---\n\n${question}` : question;
+  if (node.teamRole !== "member") return question;
+  const role = node.role ? `Vai trò của bạn trong team (${node.alias}): ${node.role}\n\n` : "";
+  return `${role}${CAPABILITY_INSTRUCTION}\n\n---\n\n${question}`;
 }
 
 /** A fresh start that still remembers the previous attempt of the same work item. */
@@ -151,6 +173,19 @@ export function orderMemberAgents(run, record, agentIds) {
 
 const formatTime = (ms) => new Date(ms).toLocaleString();
 
+/** Per agent left for the next one: how much of its answer the coordinator is shown. */
+const STOPPED_ANSWER_MAX = 1500;
+
+/**
+ * A finished answer with a `CAPABILITY_UNAVAILABLE: ...` line is not an answer: the agent had no
+ * tool for the job, so it counts as a capability_unavailable failure. The text stays on the
+ * result, since it is what the coordinator gets back to decide on.
+ */
+export function withCapabilityCheck(result) {
+  if (!result?.ok || parseCapabilityMarker(result.resultText) === null) return result;
+  return { ...result, ok: false, failureReason: "capability_unavailable" };
+}
+
 const cleanReviewOf = (v) => String(v || "").trim().slice(0, 80) || null;
 
 /** --------------------------- limits for a whole team run --------------------------- */
@@ -158,7 +193,7 @@ const cleanReviewOf = (v) => String(v || "").trim().slice(0, 80) || null;
 /** What a run has used against its team limits: hand-offs that ran (replays are free) and tokens. */
 export function teamLimitUsage(run) {
   return {
-    delegations: (run.delegations || []).filter((d) => !d.replayedFrom).length,
+    delegations: (run.delegations || []).filter((d) => !d.replayedFrom && d.kind !== "spawn").length,
     tokens: runTokens(run),
   };
 }
@@ -288,7 +323,7 @@ function finishedWorkSummary(run, done) {
   return [
     "## Lần chạy trước của bạn bị gián đoạn",
     "Các công việc dưới đây đã được thành viên làm xong; file họ sửa vẫn còn trong thư mục làm việc. Đừng giao lại từ đầu, chỉ giao tiếp khi cần sửa.",
-    "Nếu gọi lại ask_agent với đúng workItemId và đúng nội dung như trước, hệ thống trả lại ngay kết quả đã lưu.",
+    "Nếu gọi lại ask_agent (hoặc spawn_agent với cùng blueprint) với đúng workItemId và đúng nội dung như trước, hệ thống trả lại ngay kết quả đã lưu.",
     "",
     text,
   ].join("\n");
@@ -300,7 +335,7 @@ function resumeMessage(done) {
   return [
     "Lần chạy trước bị gián đoạn (server dừng hoặc người dùng bấm Dừng). Hãy tiếp tục công việc từ chỗ đã dừng.",
     ids.length ? `Các công việc đã xong: ${ids.join(", ")}. File các thành viên đã sửa vẫn còn trong thư mục làm việc.` : "Chưa có công việc nào của thành viên được ghi nhận là đã xong.",
-    "Gọi lại ask_agent với đúng workItemId và đúng nội dung như trước sẽ trả lại ngay kết quả đã lưu; việc chưa xong hoặc bị lỗi sẽ chạy bình thường.",
+    "Gọi lại ask_agent (hoặc spawn_agent với cùng blueprint) với đúng workItemId và đúng nội dung như trước sẽ trả lại ngay kết quả đã lưu; việc chưa xong hoặc bị lỗi sẽ chạy bình thường.",
   ].join("\n");
 }
 
@@ -359,10 +394,12 @@ export function createTeamCalls(deps) {
       log(`↩️ Tiếp tục phiên CLI của lần giao trước cho [${record.workItemId}].`);
       task.continuation = "resumed";
       const result = await runAgentProcess({ ...base, prompt: question, resume: plan.sessionId });
-      // Out of quota or no CLI says nothing about the session: retrying the same agent with a
-      // transcript would fail the same way, so that goes back to the caller to fail over. A call
-      // that ran out of time is over.
-      if (result.ok || result.resultText || isCancelling(runId) || call.timedOut || FAILOVER_REASONS.has(result.failureReason)) {
+      // Out of quota, no CLI, a denied tool or a missing capability say nothing about the session:
+      // retrying the same agent with a transcript would fail the same way, so that goes back to the
+      // caller to fail over. no_output is the exception: a broken session ends that way too, so
+      // the transcript gets its try first. A call that ran out of time is over.
+      const providerProblem = FAILOVER_REASONS.has(result.failureReason) && result.failureReason !== "no_output";
+      if (result.ok || result.resultText || isCancelling(runId) || call.timedOut || providerProblem) {
         return { ...result, sessionId: result.sessionId || plan.sessionId };
       }
       log(
@@ -553,10 +590,12 @@ export function createTeamCalls(deps) {
    * installed, or whose provider ran out of quota earlier in this run, are skipped; an agent that
    * fails on quota or an unavailable CLI puts its provider on cooldown and the next agent takes
    * over inside the same call, under the same work item. The coordinator sees one member.
+   * A blueprint spawn passes its own `candidates` (one agent per provider entry) and `handBack`
+   * (reasons that stop the walk and go back to the coordinator).
    */
-  async function runWithFailover({ runId, task, record, run, targetNode, question, workflow, cwd, depth, reviewOf, timeoutMinutes }) {
+  async function runWithFailover({ runId, task, record, run, targetNode, question, workflow, cwd, depth, reviewOf, timeoutMinutes, candidates = null, handBack = HANDED_BACK_REASONS }) {
     const log = (line) => pushTaskLog(runId, task.id, line);
-    const { agents, sticky, failover } = candidatesFor(run, record, targetNode);
+    const { agents, sticky, failover } = candidates || candidatesFor(run, record, targetNode);
     if (sticky && agents.length > 1) log(`📌 [${record.workItemId}] đã chạy xong trên ${agents[0].name}, giữ agent này nếu còn chạy được.`);
 
     // One deadline for the whole call, failover included: when it passes, whatever process the
@@ -570,20 +609,29 @@ export function createTeamCalls(deps) {
         }, timeoutMinutes * minuteMs)
       : null;
     try {
-      const outcome = await tryAgents({ runId, task, record, run, targetNode, question, workflow, cwd, depth, reviewOf, call, agents, failover, log });
+      const outcome = await tryAgents({ runId, task, record, run, targetNode, question, workflow, cwd, depth, reviewOf, call, agents, failover, handBack, log });
       return call.timedOut ? { ...outcome, ok: false, failureReason: "timeout" } : outcome;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  /** runWithFailover's loop: each agent of the member in turn until one does the work. */
-  async function tryAgents({ runId, task, record, run, targetNode, question, workflow, cwd, depth, reviewOf, call, agents, failover, log }) {
+  /**
+   * runWithFailover's loop: each agent of the member in turn until one does the work.
+   * Every agent tried or skipped is noted on `task.fallbackLog` ({ agentId, agentName, provider,
+   * outcome }: "done", a failure reason, or "skipped:<reason>"), which the Run tab shows.
+   * `stopped` in the result lists the agents that were left for the next one, with what they
+   * answered, so the coordinator can see why.
+   */
+  async function tryAgents({ runId, task, record, run, targetNode, question, workflow, cwd, depth, reviewOf, call, agents, failover, handBack, log }) {
     const skipped = [];
+    const stopped = [];
     let result = null;
     let place = null;
     let used = null;
     let usage = null;
+    task.fallbackLog = [];
+    const note = (agent, outcome) => task.fallbackLog.push({ agentId: agent.id || null, agentName: agent.name || null, provider: agent.provider || "claude", outcome });
     for (const [i, agent] of agents.entries()) {
       if (isCancelling(runId) || call.timedOut) break;
       const provider = agent.provider || "claude";
@@ -592,11 +640,13 @@ export function createTeamCalls(deps) {
         if (skip) {
           log(skip.message);
           skipped.push(skip.reason);
+          note(agent, `skipped:${skip.reason}`);
           continue;
         }
       }
 
       record.agentId = agent.id || null;
+      record.agentName = agent.name || null;
       record.provider = provider;
       task.agentId = agent.id || null;
       task.agentName = agent.name || null;
@@ -612,23 +662,36 @@ export function createTeamCalls(deps) {
       const prompt = place.reviewing ? `${question}${REVIEW_INSTRUCTION}` : question;
       result = await runMember({ runId, task, record, run, targetNode, targetAgent: agent, question: prompt, workflow, cwd: place.cwd, depth, call });
       usage = addUsage(usage, result.usage);
+      result = withCapabilityCheck(result);
+      note(agent, result.ok ? "done" : result.failureReason || "agent_error");
+      if (handBack.has(result.failureReason)) {
+        log(`↩️ ${agent.name} (${provider}): ${describeFailure(result.failureReason)}. Trả câu trả lời về cho điều phối viên quyết định.`);
+        break;
+      }
       if (!failover || result.ok || isCancelling(runId) || call.timedOut || !FAILOVER_REASONS.has(result.failureReason)) break;
 
-      markCooldown(run, provider, result.failureReason, result.quotaResetAt, now());
-      const cd = cooldowns(run)[provider];
-      const until = cd.until ? ` tới ${formatTime(cd.until)}` : " tới hết run";
-      log(`🔀 ${agent.name} lỗi (${result.failureReason}), tạm ngưng ${provider}${until}.${i + 1 < agents.length ? " Thử agent tiếp theo của thành viên." : ""}`);
+      stopped.push({ agentName: agent.name || null, provider, reason: result.failureReason, answer: clip(result.resultText, STOPPED_ANSWER_MAX) });
+      const next = i + 1 < agents.length ? " Thử agent tiếp theo." : "";
+      if (COOLDOWN_REASONS.has(result.failureReason)) {
+        markCooldown(run, provider, result.failureReason, result.quotaResetAt, now());
+        const cd = cooldowns(run)[provider];
+        const until = cd.until ? ` tới ${formatTime(cd.until)}` : " tới hết run";
+        log(`🔀 ${agent.name} lỗi (${result.failureReason}), tạm ngưng ${provider}${until}.${next}`);
+      } else {
+        // About this job only: the provider stays available for other calls in the run.
+        log(`🔀 ${agent.name} (${provider}) không làm được việc này: ${describeFailure(result.failureReason)} [${result.failureReason}].${next}`);
+      }
     }
 
     if (!result) {
       const failureReason = skipped.includes("quota") ? "quota" : "provider_unavailable";
       if (!isCancelling(runId)) log(`❌ Thành viên ${targetNode.alias || targetNode.id} không còn agent nào chạy được (${failureReason}).`);
-      return { ok: false, resultText: "", usage: null, failureReason: isCancelling(runId) ? "cancelled" : failureReason, agent: null };
+      return { ok: false, resultText: "", usage: null, failureReason: isCancelling(runId) ? "cancelled" : failureReason, agent: null, stopped };
     }
-    if (call.timedOut) return { ...result, usage, agent: used, place };
+    if (call.timedOut) return { ...result, usage, agent: used, place, stopped };
     if (failover && result.ok) log(`✅ Thực hiện bởi ${used.name} (${used.provider || "claude"}).`);
     if (result.ok && place) noteWorkItem(run, place, result.resultText, log);
-    return { ...result, usage, agent: used, place };
+    return { ...result, usage, agent: used, place, stopped };
   }
 
   /**
@@ -743,9 +806,10 @@ export function createTeamCalls(deps) {
   function replayDelegation({ runId, run, task, delegation, replay, targetNode }) {
     const answer = storedAnswer(run, replay);
     const known = replay.agentId ? getAgent(replay.agentId) : null;
-    const agent = known?.id === replay.agentId ? known : replay.agentId ? { id: replay.agentId, name: replay.agentId, provider: replay.provider } : null;
+    const agent = known?.id === replay.agentId ? known : replay.agentId ? { id: replay.agentId, name: replay.agentName || replay.agentId, provider: replay.provider } : null;
     Object.assign(delegation, {
       agentId: replay.agentId || null,
+      agentName: replay.agentName || null,
       provider: replay.provider || null,
       cwd: replay.cwd || delegation.cwd,
       sessionId: replay.sessionId || null,
@@ -766,5 +830,144 @@ export function createTeamCalls(deps) {
     return memberReply(targetNode, { answer, ok: true, failureReason: null, replayed: true }, agent);
   }
 
-  return { askAgent, completeWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems };
+  /** --------------------------- spawn_agent with a blueprint --------------------------- */
+
+  /**
+   * A coordinator's `spawn_agent` call that names one of its team's blueprints. The spawned agent
+   * is a member made on the spot: the server walks the blueprint's providers in order (skipping
+   * ones that are not installed or are on a quota cooldown, and moving on after any failover
+   * reason, a missing capability included, since the blueprint's per-provider instructions are the
+   * team owner's own answer to it). The call is recorded on the delegation ledger as kind "spawn",
+   * target `blueprint:<name>`, so a later call for the same workItemId and blueprint continues the
+   * same session on the provider that did the work, gets its own worktree like a member's, and a
+   * resumed coordinator gets a finished one replayed.
+   *
+   * `supervisor` is the coordinator's agent as the bridge session recorded it (with the team's
+   * spawnPolicy and blueprints); executor.js spawnAgent looks it up.
+   */
+  async function spawnBlueprint({ runId, callerNodeId, callerTaskId = null, supervisor, blueprint: name, prompt, title, workItemId, cwd, depth }) {
+    const run = runs.get(runId);
+    if (!run || run.status !== "running") throw new Error("Run không còn chạy.");
+    if (isCancelling(runId)) throw new Error("Run đang được dừng, không tạo agent mới.");
+    if (depth >= maxCallDepth) throw new Error("Đã đạt giới hạn độ sâu gọi agent (chống vòng lặp).");
+    const policy = supervisor?.spawnPolicy;
+    if (!policy?.enabled) throw new Error("Chỉ điều phối viên của một Team có bật spawn_agent mới được tạo agent.");
+    const blueprints = supervisor.blueprints || [];
+    const wanted = String(name || "").trim().toLowerCase();
+    const blueprint = blueprints.find((b) => b.name === wanted);
+    if (!blueprint) throw new Error(`Không có blueprint "${wanted}". Các blueprint của Team: ${blueprints.map((b) => b.name).join(", ") || "(không có)"}.`);
+    const itemId = String(workItemId || "").trim().slice(0, 80);
+    if (!itemId) throw new Error("spawn_agent với blueprint cần workItemId, để các lần sửa sau của cùng công việc nối tiếp đúng agent đó.");
+    if (!String(prompt || "").trim()) throw new Error("Thiếu prompt cho agent mới.");
+    // Built before anything is recorded: a blueprint above what may be handed out fails cleanly.
+    const agents = blueprint.providers.map((entry, i) => buildBlueprintAgent(supervisor, blueprint, entry, i));
+    if (!agents.length) throw new Error(`Blueprint "${blueprint.name}" chưa có provider nào.`);
+
+    const targetNode = { id: `blueprint:${blueprint.name}`, teamRole: "member", alias: blueprint.name, role: blueprint.role };
+    const callerNode = snapshotWorkflow(run).nodes.find((n) => n.id === callerNodeId);
+    const limits = callerNode?.teamLimits || null;
+    const ledger = Array.isArray(run.delegations) ? run.delegations : (run.delegations = []);
+    const probe = { kind: "spawn", callerNodeId, targetNodeId: targetNode.id, workItemId: itemId, questionFingerprint: questionFingerprint(prompt) };
+    const replay = replayableDelegation(run, probe);
+    if (!replay) {
+      try {
+        const busy = ledger.some((d) => d.kind === "spawn" && d.callerNodeId === callerNodeId && d.targetNodeId === targetNode.id && d.workItemId === itemId && d.status === "running");
+        if (busy) throw new Error(`Công việc "${itemId}" của blueprint ${blueprint.name} đang chạy; không được giao trùng.`);
+        checkSpawnLimits(run, policy, { key: blueprintSpawnKey(blueprint.name, itemId) });
+        checkTeamLimits(run, limits, { delegation: false });
+      } catch (err) {
+        if (callerTaskId) pushTaskLog(runId, callerTaskId, `⛔ ${err.message}`);
+        throw err;
+      }
+    }
+
+    const label = String(title || prompt).trim().split("\n")[0].slice(0, 80);
+    const task = newTask(`🧬 ${label}`, "agent-spawn", callerNodeId || null, agents[0]);
+    if (run.activeTurnId) task.turnId = run.activeTurnId; // part of a chat turn: deleted with it
+    task.spawnedByTaskId = callerTaskId || null;
+    task.workItemId = itemId;
+    task.question = prompt;
+    task.spawn = {
+      blueprint: blueprint.name,
+      role: blueprint.role,
+      accessLevel: blueprint.accessLevel,
+      providers: blueprint.providers.map((p) => p.provider),
+      provider: null,
+      model: null,
+      supervisorName: supervisor.name || null,
+      limits: { maxAgents: policy.maxAgents, tokenBudget: policy.tokenBudget },
+    };
+    const record = {
+      ...probe,
+      id: task.id,
+      blueprint: blueprint.name,
+      parentWorkItemId: null,
+      status: "running",
+      failureReason: null,
+      createdAt: Date.now(),
+      agentId: null,
+      agentName: null,
+      provider: null,
+      cwd: cwd || "",
+      sessionId: null,
+      attempt: run.attempt || 0,
+    };
+    ledger.push(record);
+    run.tasks.push(task);
+    emit({ runId, taskId: task.id, type: "task-created", task });
+    task.status = "running";
+    emit({ runId, taskId: task.id, type: "task-status", status: "running" });
+    if (callerTaskId) pushTaskLog(runId, callerTaskId, `🧬 Tạo agent từ blueprint ${blueprint.name} cho [${itemId}]: ${label}`);
+    pushTaskLog(runId, task.id, `🧬 Blueprint ${blueprint.name} (${blueprint.accessLevel}), provider theo thứ tự: ${blueprint.providers.map((p) => p.provider).join(" → ")}`);
+    pushTaskLog(runId, task.id, `❓ ${prompt}`);
+
+    const usageNow = () => ({ spawned: spawnedCount(run), maxAgents: policy.maxAgents, tokensUsed: spawnedTokens(run), tokenBudget: policy.tokenBudget });
+    if (replay) {
+      const reply = replayDelegation({ runId, run, task, delegation: record, replay, targetNode });
+      Object.assign(task.spawn, { provider: replay.provider || null });
+      return { ...reply, blueprint: blueprint.name, stopped: [], usage: usageNow() };
+    }
+
+    const { ids, sticky } = orderMemberAgents(run, record, agents.map((a) => a.id));
+    const ordered = ids.map((id) => agents.find((a) => a.id === id));
+    let processResult;
+    try {
+      processResult = await runWithFailover({
+        runId,
+        task,
+        record,
+        run,
+        targetNode,
+        question: prompt,
+        workflow: null,
+        cwd,
+        depth,
+        reviewOf: null,
+        timeoutMinutes: limits?.callTimeoutMinutes || 0,
+        candidates: { agents: ordered, sticky, failover: true },
+        handBack: new Set(),
+      });
+    } catch (err) {
+      pushTaskLog(runId, task.id, `❌ Lỗi nội bộ khi chạy agent: ${err.message}`);
+      processResult = { ok: false, resultText: "", usage: null, failureReason: "agent_error", agent: null, stopped: [] };
+    }
+    const { ok, resultText, usage, failureReason, sessionId, agent, place, stopped = [] } = processResult;
+
+    task.resultText = resultText;
+    task.usage = usage;
+    task.sessionId = sessionId || null;
+    task.failureReason = failureReason || null;
+    task.status = isCancelling(runId) ? "cancelled" : ok ? "done" : "error";
+    Object.assign(task.spawn, { provider: agent?.provider || null, model: agent?.model || null });
+    record.sessionId = sessionId || null;
+    if (task.status === "done") record.answer = resultText;
+    finishDelegation(record, { ok: task.status === "done", failureReason: task.status === "cancelled" ? "cancelled" : failureReason });
+    emit({ runId, taskId: task.id, type: "task-status", status: task.status, usage });
+
+    const reply = memberReply(targetNode, { answer: resultText, ok: task.status === "done", failureReason: task.failureReason }, agent);
+    if (place?.itemId && reply.ok) reply.note = `Làm trong worktree riêng của [${place.itemId}]; gọi complete_work_item khi công việc đã xong và review đạt.`;
+    return { ...reply, blueprint: blueprint.name, stopped, usage: usageNow() };
+  }
+
+  return { askAgent, spawnBlueprint, completeWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems };
 }

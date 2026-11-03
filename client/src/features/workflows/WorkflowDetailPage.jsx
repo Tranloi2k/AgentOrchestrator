@@ -23,6 +23,7 @@ const BLANK_TEAM = {
   coordinator: { agentId: "", process: "" },
   members: [],
   spawnPolicy: BLANK_SPAWN_POLICY,
+  blueprints: [],
   limits: DEFAULT_TEAM_LIMITS,
 };
 

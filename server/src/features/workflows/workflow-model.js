@@ -12,8 +12,10 @@
  *    on its own, and it may call every member; members are manual nodes whose id is their alias.
  */
 import { nanoid } from "nanoid";
-import { normalizeSpawnPolicy } from "../runs/spawn-policy.js";
+import { normalizeSpawnPolicy, normalizeBlueprints, isBlueprintName } from "../runs/spawn-policy.js";
 import { parseCron } from "../schedules/cron.js";
+import { PROVIDERS, SUBAGENT_TOOL } from "../../core/config.js";
+import { WRITE_TOOLS, levelRank } from "../agents/access.js";
 
 export const WORKFLOW_TYPES = ["pipeline", "team"];
 export const COORDINATOR_NODE_ID = "coordinator";
@@ -146,6 +148,8 @@ export function normalizeTeam(input) {
       role: String(m.role || "").trim(),
     })),
     spawnPolicy: normalizeSpawnPolicy(team.spawnPolicy),
+    // Roles the coordinator may spawn by name, each with its own providers in order (spawn-policy.js).
+    blueprints: normalizeBlueprints(team.blueprints),
     limits: normalizeTeamLimits(team.limits),
   };
 }
@@ -167,6 +171,8 @@ export function teamToGraph(team) {
         autoStart: true,
         // Overrides whatever spawn_agent setting the coordinator's agent has on its own.
         spawnPolicy: team.spawnPolicy,
+        // The team's blueprints, carried on the node like spawnPolicy so a run keeps the ones it started with.
+        blueprints: team.blueprints || [],
         // Carried on the node so a run's snapshot keeps the limits it started with.
         teamLimits: team.limits,
       },
@@ -268,6 +274,27 @@ export function normalizeWorkflowInput(input) {
   return { ...common, ...normalizePipeline(input) };
 }
 
+/**
+ * Every agent a workflow depends on: each node's agent, a team member's backups (agentIds), a
+ * Pipeline step's fallbacks (fallbackAgentIds) and, for a Team, its coordinator and members as
+ * stored. Deleting any of them would leave the workflow pointing at nothing.
+ */
+export function workflowAgentIds(workflow) {
+  const ids = new Set();
+  const add = (id) => id && ids.add(String(id));
+  for (const n of workflow?.nodes || []) {
+    add(n.agentId);
+    (n.agentIds || []).forEach(add);
+    (n.fallbackAgentIds || []).forEach(add);
+  }
+  add(workflow?.team?.coordinator?.agentId);
+  for (const m of workflow?.team?.members || []) {
+    add(m.agentId);
+    (m.agentIds || []).forEach(add);
+  }
+  return ids;
+}
+
 /** --------------------------- validation (strict: runs on every save) --------------------------- */
 
 /**
@@ -275,7 +302,7 @@ export function normalizeWorkflowInput(input) {
  * whatever doesn't fit. The client turns each code into a message; params carry node ids,
  * aliases and labels so the message can point at the exact spot.
  */
-export function validateWorkflow(input, { agentExists }) {
+export function validateWorkflow(input, { agentExists, skillExists = () => true }) {
   const errors = [];
   const err = (code, params = {}) => errors.push({ code, params });
   const inputs = normalizeInputs(input.inputs);
@@ -283,7 +310,7 @@ export function validateWorkflow(input, { agentExists }) {
   const inputNames = new Set(inputs.map((i) => i.name));
   if (input.type === "team") {
     const team = normalizeTeam(input.team);
-    validateTeam(team, agentExists, err);
+    validateTeam(team, agentExists, err, skillExists);
     for (const ref of templateRefs(team.coordinator.process).inputs) if (!inputNames.has(ref)) err("refUnknownInput", { node: COORDINATOR_NODE_ID, ref });
   } else validatePipeline(input, agentExists, err, inputNames);
   return errors;
@@ -310,13 +337,13 @@ function validateInputsAndSchedules(inputs, schedules, err) {
   });
 }
 
-function validateTeam(team, agentExists, err) {
+function validateTeam(team, agentExists, err, skillExists = () => true) {
   if (!team.coordinator.agentId) err("teamNoCoordinator");
   else if (!agentExists(team.coordinator.agentId)) err("unknownAgent", { node: COORDINATOR_NODE_ID });
 
-  // A team without members is fine as long as its coordinator can spawn agents — that is how a
-  // run gets a supervisor creating agents on the fly. With neither, it has nobody to hand work to.
-  if (!team.members.length && !team.spawnPolicy.enabled) err("teamEmpty");
+  // A team needs fixed members, or spawning on with at least one blueprint: then its coordinator
+  // creates the members the job needs itself. With neither, it has nobody to hand work to.
+  if (!team.members.length && !(team.spawnPolicy.enabled && team.blueprints.length)) err("teamEmpty");
   const seen = new Set();
   team.members.forEach((m, i) => {
     const alias = m.alias;
@@ -331,7 +358,26 @@ function validateTeam(team, agentExists, err) {
     if (!m.role) err("memberNoRole", { alias: who });
   });
 
-  if (team.spawnPolicy.enabled && !team.spawnPolicy.providers.length) err("spawnNoProviders");
+  // Ad-hoc spawns need a provider list; a team that only spawns blueprints doesn't.
+  if (team.spawnPolicy.enabled && !team.spawnPolicy.providers.length && !team.blueprints.length) err("spawnNoProviders");
+
+  const names = new Set();
+  team.blueprints.forEach((b, i) => {
+    const who = b.name || `#${i + 1}`;
+    if (!isBlueprintName(b.name)) err("blueprintNameInvalid", { name: b.name, index: i + 1 });
+    else if (names.has(b.name)) err("blueprintNameDuplicate", { name: b.name });
+    names.add(b.name);
+    if (!b.role) err("blueprintNoRole", { name: who });
+    // The Team's ceiling for spawned agents (spawnPolicy.maxAccessLevel, see spawnCeiling).
+    const max = team.spawnPolicy.maxAccessLevel;
+    if (levelRank(b.accessLevel) > levelRank(max)) err("blueprintAccessTooHigh", { name: who, level: b.accessLevel, max });
+    if (!b.providers.length) err("blueprintNoProviders", { name: who });
+    for (const p of b.providers) if (!PROVIDERS.includes(p.provider)) err("blueprintUnknownProvider", { name: who, provider: p.provider });
+    for (const id of b.skillIds) if (!skillExists(id)) err("blueprintUnknownSkill", { name: who, skill: id });
+    if (b.tools?.includes(SUBAGENT_TOOL)) err("blueprintTaskTool", { name: who });
+    const writeTools = (b.tools || []).filter((t) => WRITE_TOOLS.includes(t));
+    if (b.accessLevel === "read" && writeTools.length) err("blueprintWriteToolsReadOnly", { name: who, tools: writeTools.join(", ") });
+  });
 }
 
 function validatePipeline(input, agentExists, err, inputNames = new Set()) {

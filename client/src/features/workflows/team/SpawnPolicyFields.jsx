@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { api } from "../../../shared/api.js";
 import { usePreferences } from "../../../app/PreferencesContext.jsx";
 import { DetailField, DetailFieldGrid } from "../../../shared/components/DetailLayout.jsx";
-import { TextInput } from "../../../shared/components/Input.jsx";
+import { Select, TextInput } from "../../../shared/components/Input.jsx";
 import CheckboxField from "../../../shared/components/CheckboxField.jsx";
 import ChipSelect from "../../../shared/components/ChipSelect.jsx";
 import { HelperText } from "../../../shared/components/Feedback.jsx";
@@ -17,12 +17,14 @@ export const BLANK_SPAWN_POLICY = {
   geminiModels: [],
   maxAgents: 5,
   tokenBudget: 500000,
+  // The most access a spawned agent may get in this team; read unless the owner raises it.
+  maxAccessLevel: "read",
 };
 
 /**
  * A Team's spawn_agent setting (see server/spawn-policy.js): which providers/models its
- * coordinator may create agents with, and the per-run limits. What a spawned agent may *do* is
- * not set here — it's capped by the coordinator's own access level and tools.
+ * coordinator may create agents with, the per-run limits, and the most access a spawned agent may
+ * get (maxAccessLevel, the team's ceiling for ad-hoc spawns and blueprints alike).
  */
 export default function SpawnPolicyFields({ id, value, onChange, enabledLabel, hint }) {
   const { t } = usePreferences();
@@ -79,6 +81,12 @@ export default function SpawnPolicyFields({ id, value, onChange, enabledLabel, h
             </>
           )}
           <HelperText>{t("agents.spawn.modelsHint")}</HelperText>
+          <Select
+            label={t("agents.spawn.maxAccessLevel")}
+            value={spawn.maxAccessLevel}
+            options={["read", "write", "full"].map((level) => ({ value: level, label: t(`agents.access.${level}`) }))}
+            onChange={(e) => set({ maxAccessLevel: e.target.value })}
+          />
           <HelperText>{t("agents.spawn.ceilingHint")}</HelperText>
           <DetailFieldGrid>
             <TextInput
