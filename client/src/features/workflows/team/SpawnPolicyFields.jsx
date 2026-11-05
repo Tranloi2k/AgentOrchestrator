@@ -5,7 +5,6 @@ import { DetailField, DetailFieldGrid } from "../../../shared/components/DetailL
 import { Select, TextInput } from "../../../shared/components/Input.jsx";
 import CheckboxField from "../../../shared/components/CheckboxField.jsx";
 import ChipSelect from "../../../shared/components/ChipSelect.jsx";
-import { HelperText } from "../../../shared/components/Feedback.jsx";
 
 const PROVIDERS = ["claude", "codex", "gemini"];
 
@@ -40,11 +39,10 @@ export default function SpawnPolicyFields({ id, value, onChange, enabledLabel, h
 
   return (
     <>
-      <CheckboxField id={id} checked={spawn.enabled} onChange={(enabled) => set({ enabled })} label={enabledLabel} />
-      {hint && <HelperText>{hint}</HelperText>}
+      <CheckboxField id={id} checked={spawn.enabled} onChange={(enabled) => set({ enabled })} label={enabledLabel} hint={hint} />
       {spawn.enabled && (
         <>
-          <DetailField label={t("agents.spawn.providers")} full>
+          <DetailField label={t("agents.spawn.providers")} hint={t("agents.spawn.modelsHint")} full>
             <ChipSelect
               options={PROVIDERS.map((p) => ({
                 value: p,
@@ -80,20 +78,20 @@ export default function SpawnPolicyFields({ id, value, onChange, enabledLabel, h
               </DetailField>
             </>
           )}
-          <HelperText>{t("agents.spawn.modelsHint")}</HelperText>
           <Select
             label={t("agents.spawn.maxAccessLevel")}
             value={spawn.maxAccessLevel}
             options={["read", "write", "full"].map((level) => ({ value: level, label: t(`agents.access.${level}`) }))}
             onChange={(e) => set({ maxAccessLevel: e.target.value })}
+            hint={t("agents.spawn.ceilingHint")}
           />
-          <HelperText>{t("agents.spawn.ceilingHint")}</HelperText>
           <DetailFieldGrid>
             <TextInput
               type="number"
               min={1}
               max={50}
               label={t("agents.spawn.maxAgents")}
+              hint={t("agents.spawn.limitsHint")}
               value={spawn.maxAgents}
               onChange={(e) => set({ maxAgents: Number(e.target.value) })}
             />
@@ -106,7 +104,6 @@ export default function SpawnPolicyFields({ id, value, onChange, enabledLabel, h
               onChange={(e) => set({ tokenBudget: Number(e.target.value) })}
             />
           </DetailFieldGrid>
-          <HelperText>{t("agents.spawn.limitsHint")}</HelperText>
         </>
       )}
     </>

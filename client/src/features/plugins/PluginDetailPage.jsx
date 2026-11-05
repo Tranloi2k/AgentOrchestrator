@@ -60,7 +60,6 @@ export default function PluginDetailPage() {
         { label: isNew ? t("plugins.form.create") : form.name || "..." },
       ]}
       title={title}
-      subtitle={t("nav.plugins.desc")}
       error={error}
       saving={saving}
       saveLabel={saving ? t("plugins.installing") : t("common.save")}

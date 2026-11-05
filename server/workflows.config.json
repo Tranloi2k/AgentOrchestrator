@@ -626,5 +626,85 @@
       }
     ],
     "edges": []
+  },
+  {
+    "id": "FJd7UTOs",
+    "name": "New workflow",
+    "description": "test",
+    "type": "team",
+    "isolation": {
+      "enabled": false,
+      "testCommand": "",
+      "keepOnFailure": true
+    },
+    "inputs": [],
+    "limits": {
+      "timeoutMin": 0,
+      "tokenBudget": 0
+    },
+    "schedules": [],
+    "team": {
+      "coordinator": {
+        "agentId": "rxCoord1",
+        "process": "## Cách khởi động nhóm\ntạo các sub agent để thực các công việc trong quy trình xây dụng 1 feature react mới hãy khởi chạy bằng lệnh `spawn_agent`; báo cáo từ `spawn_agent` sẽ cho biết nhà cung cấp nào đã thực hiện công việc đó.\n\n## Các vai trò\n- `engineer` (kỹ sư): thực hiện một hạng mục công việc dựa trên bản mô tả (brief). Kỹ sư cần báo cáo các tệp đã thay đổi cùng kết quả kiểm tra kiểu (typecheck), kiểm tra cú pháp (lint) và kiểm tra mã nguồn (test) — hoặc ghi chú là \"không thực thi\" (not run) nếu tác nhân hoạt động trên một nhà cung cấp không có quyền truy cập vào shell.\n- `reviewer` (người đánh giá): xem xét một hạng mục công việc, tự mình thực hiện các bước kiểm tra, và đưa ra kết luận: `VERDICT: PASS` (Đạt) hoặc `VERDICT: CHANGES_REQUESTED` (Yêu cầu thay đổi). Người đánh giá không được phép chỉnh sửa tệp.\n\n## Trình tự thực hiện\n1. Ưu tiên mã nguồn dùng chung (shared code) trước: các kiểu dữ liệu (types), API client, các hook và thành phần (components) dùng chung. Mỗi hạng mục công việc này phải được hoàn thành và đánh giá xong trước khi bất kỳ phần nào khác phụ thuộc vào nó.\n2. Tiếp theo là phát triển các tính năng. Hai hạng mục công việc của kỹ sư chỉ có thể thực hiện song song khi chúng nằm trong các thư mục khác nhau và không chia sẻ bất kỳ tệp nào.\n3. Mỗi hạng mục công việc sẽ được đánh giá một lần, sau khi kỹ sư phụ trách gửi báo cáo hoàn thành.\n\n## Quy trình đánh giá\n\n## Đối với dự án này\n- Tuân thủ các hướng dẫn trong tệp `AGENTS.md` hoặc `CLAUDE.md` (nếu có trong kho lưu trữ).\n- Xác thực bằng các tập lệnh (scripts) kiểm tra kiểu, kiểm tra cú pháp và kiểm tra mã nguồn có trong `package.json`. Nếu thiếu tập lệnh nào, hãy ghi chú điều đó trong báo cáo cuối cùng thay vì tự ý tạo mới.\n- Không được thay đổi: các tệp `.env`, tệp khóa (lockfiles — trừ khi có sự phê duyệt về thay đổi phụ thuộc), cấu hình CI, hoặc mã nguồn được tạo tự động (generated code).\n\n## Hoàn thành\nMột hạng mục công việc chỉ được coi là hoàn thành khi các bước kiểm tra kiểu, kiểm tra cú pháp và kiểm tra mã nguồn đều đạt (do kỹ sư thực hiện, hoặc do người đánh giá thực hiện trong trường hợp kỹ sư không có quyền truy cập shell) và người đánh giá đã đưa ra kết luận `VERDICT: PASS`."
+      },
+      "members": [],
+      "spawnPolicy": {
+        "enabled": true,
+        "providers": [
+          "gemini"
+        ],
+        "claudeModels": [],
+        "codexModels": [],
+        "geminiModels": [
+          "claude-sonnet-5-5-medium",
+          "claude-opus-5-5-medium",
+          "gemini-3.8-flash-medium"
+        ],
+        "maxAgents": 5,
+        "tokenBudget": 500000,
+        "maxAccessLevel": "full"
+      },
+      "blueprints": [],
+      "limits": {
+        "maxDelegations": 30,
+        "callTimeoutMinutes": 30,
+        "runTokenBudget": 2000000
+      }
+    },
+    "nodes": [
+      {
+        "id": "coordinator",
+        "agentId": "rxCoord1",
+        "promptTemplate": "## Cách khởi động nhóm\ntạo các sub agent để thực các công việc trong quy trình xây dụng 1 feature react mới hãy khởi chạy bằng lệnh `spawn_agent`; báo cáo từ `spawn_agent` sẽ cho biết nhà cung cấp nào đã thực hiện công việc đó.\n\n## Các vai trò\n- `engineer` (kỹ sư): thực hiện một hạng mục công việc dựa trên bản mô tả (brief). Kỹ sư cần báo cáo các tệp đã thay đổi cùng kết quả kiểm tra kiểu (typecheck), kiểm tra cú pháp (lint) và kiểm tra mã nguồn (test) — hoặc ghi chú là \"không thực thi\" (not run) nếu tác nhân hoạt động trên một nhà cung cấp không có quyền truy cập vào shell.\n- `reviewer` (người đánh giá): xem xét một hạng mục công việc, tự mình thực hiện các bước kiểm tra, và đưa ra kết luận: `VERDICT: PASS` (Đạt) hoặc `VERDICT: CHANGES_REQUESTED` (Yêu cầu thay đổi). Người đánh giá không được phép chỉnh sửa tệp.\n\n## Trình tự thực hiện\n1. Ưu tiên mã nguồn dùng chung (shared code) trước: các kiểu dữ liệu (types), API client, các hook và thành phần (components) dùng chung. Mỗi hạng mục công việc này phải được hoàn thành và đánh giá xong trước khi bất kỳ phần nào khác phụ thuộc vào nó.\n2. Tiếp theo là phát triển các tính năng. Hai hạng mục công việc của kỹ sư chỉ có thể thực hiện song song khi chúng nằm trong các thư mục khác nhau và không chia sẻ bất kỳ tệp nào.\n3. Mỗi hạng mục công việc sẽ được đánh giá một lần, sau khi kỹ sư phụ trách gửi báo cáo hoàn thành.\n\n## Quy trình đánh giá\n\n## Đối với dự án này\n- Tuân thủ các hướng dẫn trong tệp `AGENTS.md` hoặc `CLAUDE.md` (nếu có trong kho lưu trữ).\n- Xác thực bằng các tập lệnh (scripts) kiểm tra kiểu, kiểm tra cú pháp và kiểm tra mã nguồn có trong `package.json`. Nếu thiếu tập lệnh nào, hãy ghi chú điều đó trong báo cáo cuối cùng thay vì tự ý tạo mới.\n- Không được thay đổi: các tệp `.env`, tệp khóa (lockfiles — trừ khi có sự phê duyệt về thay đổi phụ thuộc), cấu hình CI, hoặc mã nguồn được tạo tự động (generated code).\n\n## Hoàn thành\nMột hạng mục công việc chỉ được coi là hoàn thành khi các bước kiểm tra kiểu, kiểm tra cú pháp và kiểm tra mã nguồn đều đạt (do kỹ sư thực hiện, hoặc do người đánh giá thực hiện trong trường hợp kỹ sư không có quyền truy cập shell) và người đánh giá đã đưa ra kết luận `VERDICT: PASS`.",
+        "kind": "agent",
+        "teamRole": "coordinator",
+        "calleeNodeIds": [],
+        "autoStart": true,
+        "spawnPolicy": {
+          "enabled": true,
+          "providers": [
+            "gemini"
+          ],
+          "claudeModels": [],
+          "codexModels": [],
+          "geminiModels": [
+            "claude-sonnet-5-5-medium",
+            "claude-opus-5-5-medium",
+            "gemini-3.8-flash-medium"
+          ],
+          "maxAgents": 5,
+          "tokenBudget": 500000,
+          "maxAccessLevel": "full"
+        },
+        "blueprints": [],
+        "teamLimits": {
+          "maxDelegations": 30,
+          "callTimeoutMinutes": 30,
+          "runTokenBudget": 2000000
+        }
+      }
+    ],
+    "edges": []
   }
 ]

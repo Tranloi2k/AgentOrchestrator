@@ -39,7 +39,7 @@ function setup(members, script = [], { unavailable = [], limits = null } = {}) {
     const next = script.shift();
     return next ? next(opts) : { ok: true, resultText: `answer ${calls.length}`, usage: null, sessionId: `${opts.agent.provider}-session-${calls.length}` };
   };
-  const { askAgent, spawnBlueprint } = createTeamCalls({
+  const { askAgent, spawnBlueprint, spawnInline } = createTeamCalls({
     runs: new Map([[run.id, run]]),
     getAgent: (id) => AGENTS[id] || Object.values(AGENTS)[0], // like the real one: falls back to the first agent
     agentForNode: (node) => AGENTS[node.agentId],
@@ -57,7 +57,7 @@ function setup(members, script = [], { unavailable = [], limits = null } = {}) {
   });
   const ask = (targetNodeId, question, workItemId = "feature", extra = {}) =>
     askAgent({ runId: run.id, workflowId: "wf1", callerNodeId: "coordinator", targetNodeId, question, workItemId, cwd: "/repo", depth: 0, ...extra });
-  return { run, calls, ask, clock, killed, spawnBlueprint };
+  return { run, calls, ask, clock, killed, spawnBlueprint, spawnInline };
 }
 
 const quota = (quotaResetAt = null) => () => ({ ok: false, resultText: "", usage: { inputTokens: 1 }, failureReason: "quota", quotaResetAt });
@@ -759,4 +759,36 @@ test("fixed members keep working next to blueprints, with their own agent fallba
   const spawned = await spawn("writer", "Write the tagline", "tagline");
   assert.equal(spawned.ok, true);
   assert.deepEqual(calls.map((c) => c.agent.id), ["agyDev", "claudeDev", "blueprint:writer#0:claude"]);
+});
+
+/** --------------------------- spawn_agent with an agent the coordinator defines --------------------------- */
+
+test("inline spawn: the coordinator's own role and instructions, continued per name and workItemId", async () => {
+  const { run, calls, spawnInline, supervisor } = spawnSetup([], { blueprints: [], members: {} });
+  supervisor.spawnPolicy = { ...supervisor.spawnPolicy, providers: ["claude"], claudeModels: [], codexModels: [], geminiModels: [], maxAccessLevel: "write" };
+  const spawn = (prompt, workItemId = "api", extra = {}) =>
+    spawnInline({ runId: run.id, callerNodeId: "coordinator", supervisor, name: "backend-dev", role: "Builds the API", instructions: "You write Node.", provider: "claude", accessLevel: "write", prompt, workItemId, cwd: "/repo", depth: 0, ...extra });
+
+  const first = await spawn("Build the login endpoint");
+  assert.equal(first.ok, true);
+  assert.equal(first.blueprint, "backend-dev");
+  assert.equal(calls[0].agent.appendSystemPrompt, "You write Node.");
+  assert.equal(calls[0].agent.accessLevel, "write");
+  const task = run.tasks.find((x) => x.kind === "agent-spawn");
+  assert.equal(task.spawn.inline, true);
+  assert.equal(task.spawn.role, "Builds the API");
+  assert.equal(run.delegations[0].targetNodeId, "spawn:backend-dev");
+
+  await spawn("Fix: return 401 on a bad password");
+  assert.equal(calls[1].resume, "claude-session-1", "the same name and workItemId resume the agent's session");
+  assert.equal(first.usage.spawned, 1);
+  await assert.rejects(spawn("Another", ""), /workItemId/);
+});
+
+test("inline spawn: may not shadow a stored blueprint, and stays inside the policy", async () => {
+  const { run, spawnInline, supervisor } = spawnSetup();
+  supervisor.spawnPolicy = { ...supervisor.spawnPolicy, providers: ["claude"], claudeModels: [], codexModels: [], geminiModels: [] };
+  const call = { runId: run.id, callerNodeId: "coordinator", supervisor, prompt: "Do it", workItemId: "x", cwd: "/repo", depth: 0 };
+  await assert.rejects(spawnInline({ ...call, name: "painter", provider: "claude" }), /tên một blueprint/);
+  await assert.rejects(spawnInline({ ...call, name: "dev", provider: "codex" }), /không nằm trong danh sách/);
 });

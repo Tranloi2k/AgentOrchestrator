@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../shared/api.js";
 import { usePreferences } from "../../app/PreferencesContext.jsx";
-import { CheckboxField, HelperText } from "../../shared/components/index.js";
+import { CheckboxField, HelperText, InfoTip } from "../../shared/components/index.js";
 
 /**
  * Target git branch for a run: where the agent's code lands once you Accept it. Re-reads the
@@ -46,7 +46,12 @@ export default function BranchPicker({ cwd, value, onChange }) {
 
   return (
     <div className="run-field">
-      <label htmlFor="run-branch">{t(creating ? "run.branch.from" : "run.branch")}</label>
+      <div className="label-with-tip">
+        <label htmlFor="run-branch">{t(creating ? "run.branch.from" : "run.branch")}</label>
+        <InfoTip>
+          {t("run.branch.hint", { branch: creating && value.newBranch.trim() ? value.newBranch.trim() : value.branch })}
+        </InfoTip>
+      </div>
       <select id="run-branch" value={value.branch} onChange={(e) => onChange({ ...value, branch: e.target.value })}>
         {repo.branches.map((b) => (
           <option key={b} value={b}>
@@ -72,9 +77,6 @@ export default function BranchPicker({ cwd, value, onChange }) {
           onChange={(e) => onChange({ ...value, newBranch: e.target.value.replace(/\s+/g, "-") })}
         />
       )}
-      <HelperText>
-        {t("run.branch.hint", { branch: creating && value.newBranch.trim() ? value.newBranch.trim() : value.branch })}
-      </HelperText>
     </div>
   );
 }

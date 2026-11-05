@@ -95,6 +95,34 @@ export function IconCopy({ size = 16 }) {
   );
 }
 
+export function IconEdit({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+      <path d="M10.5 2.5l3 3-8 8H2.5v-3l8-8z" strokeLinejoin="round" />
+      <path d="M9 4l3 3" />
+    </svg>
+  );
+}
+
+export function IconEye({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+      <path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" strokeLinejoin="round" />
+      <circle cx="8" cy="8" r="2" />
+    </svg>
+  );
+}
+
+export function IconEyeOff({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+      <path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" strokeLinejoin="round" />
+      <circle cx="8" cy="8" r="2" />
+      <path d="M2.5 13.5l11-11" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function IconCheck({ size = 16 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
@@ -140,6 +168,25 @@ export function IconLogo({ size = 24, title }) {
       className="app-logo"
       draggable={false}
     />
+  );
+}
+
+export function IconSidebar({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+      <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" />
+      <path d="M6 2.75v10.5" />
+    </svg>
+  );
+}
+
+export function IconInfo({ size = 14 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M8 7.25v3.5" strokeLinecap="round" />
+      <circle cx="8" cy="5" r="0.4" fill="currentColor" />
+    </svg>
   );
 }
 

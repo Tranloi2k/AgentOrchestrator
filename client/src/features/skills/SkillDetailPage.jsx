@@ -59,7 +59,6 @@ export default function SkillDetailPage() {
         { label: isNew ? t("skills.form.create") : form.name || "..." },
       ]}
       title={title}
-      subtitle={t("nav.skills.desc")}
       error={error}
       saving={saving}
       onSave={handleSave}

@@ -61,15 +61,8 @@ export const spawnedCount = (run) => new Set(run.tasks.filter((t) => t.kind === 
 /** The key a blueprint spawn of `workItemId` counts under (see spawnedCount). */
 export const blueprintSpawnKey = (blueprint, workItemId) => `${blueprint}|${workItemId}`;
 
-/**
- * Checks a spawn request against the team's spawnPolicy and the supervisor's own ceiling, and
- * turns it into a throwaway agent config. The result is never saved and has no skills, plugins
- * or spawn rights of its own. For Claude, every known tool outside the chosen set is explicitly
- * denied, not just left out — an empty allow list would otherwise mean "no restriction".
- *
- * `accessLevel` defaults to "read": a child only gets to edit when the supervisor asks for it.
- */
-export function buildSpawnedAgent(policy, supervisor, { provider, model, tools, accessLevel }) {
+/** The provider/model a spawn asks for, checked against the policy's lists; throws when not allowed. */
+function allowedProviderModel(policy, provider, model) {
   if (!provider) {
     if (policy.providers.length !== 1) throw new Error(`Cần chọn provider: ${policy.providers.join(", ") || "(không có provider nào được phép)"}.`);
     provider = policy.providers[0];
@@ -81,7 +74,19 @@ export function buildSpawnedAgent(policy, supervisor, { provider, model, tools, 
   if (model && !allowedModels.includes(model)) {
     throw new Error(`Model "${model}" không được phép cho ${provider}. Được phép: mặc định của CLI${allowedModels.length ? ", " + allowedModels.join(", ") : ""}.`);
   }
+  return { provider, model };
+}
 
+/**
+ * Checks a spawn request against the team's spawnPolicy and the supervisor's own ceiling, and
+ * turns it into a throwaway agent config. The result is never saved and has no skills, plugins
+ * or spawn rights of its own. For Claude, every known tool outside the chosen set is explicitly
+ * denied, not just left out — an empty allow list would otherwise mean "no restriction".
+ *
+ * `accessLevel` defaults to "read": a child only gets to edit when the supervisor asks for it.
+ */
+export function buildSpawnedAgent(policy, supervisor, { provider: wantedProvider, model: wantedModel, tools, accessLevel }) {
+  const { provider, model } = allowedProviderModel(policy, wantedProvider, wantedModel);
   const ceiling = spawnCeiling(policy, supervisor);
   const level = accessLevel || "read";
   if (!ACCESS_LEVELS.includes(level)) throw new Error(`accessLevel "${level}" không hợp lệ. Dùng: ${ACCESS_LEVELS.join(", ")}.`);
@@ -181,6 +186,37 @@ export function buildBlueprintAgent(supervisor, blueprint, entry, index) {
     allowedTools: chosen,
     disallowedTools: KNOWN_TOOLS.filter((t) => !chosen.includes(t)),
     spawn: { ...spawn, tools: chosen },
+  };
+}
+
+/**
+ * A blueprint the coordinator defines itself at spawn time, the way Claude Code writes a subagent:
+ * its own name, role and instructions, one provider/model from the Team's spawnPolicy. It runs
+ * through the same machinery as a stored blueprint (workItemId rounds, worktrees, replay), and
+ * buildBlueprintAgent caps its access and tools at the ceiling. `taken` are the names of the
+ * Team's stored blueprints, which an inline one may not shadow.
+ */
+export function buildInlineBlueprint(policy, { name, role, instructions, provider, model, accessLevel, tools }, taken = []) {
+  const chosen = allowedProviderModel(policy, provider, model);
+  const level = accessLevel || "read";
+  if (!ACCESS_LEVELS.includes(level)) throw new Error(`accessLevel "${level}" không hợp lệ. Dùng: ${ACCESS_LEVELS.join(", ")}.`);
+  const cleanName = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^[-_]+/, "")
+    .slice(0, 40);
+  if (!isBlueprintName(cleanName)) throw new Error('Cần name cho agent mới (chữ thường, số, - hoặc _, tối đa 40 ký tự), ví dụ "backend-dev".');
+  if (taken.includes(cleanName)) throw new Error(`"${cleanName}" là tên một blueprint của Team: truyền blueprint="${cleanName}" để dùng nó, hoặc đặt tên khác.`);
+  return {
+    name: cleanName,
+    role: String(role || "").trim().slice(0, 300),
+    instructions: String(instructions || "").slice(0, 20000),
+    skillIds: [],
+    accessLevel: level,
+    providers: [{ provider: chosen.provider, model: chosen.model, instructions: "" }],
+    tools: Array.isArray(tools) ? [...new Set(tools.map(String))] : null,
+    inline: true,
   };
 }
 

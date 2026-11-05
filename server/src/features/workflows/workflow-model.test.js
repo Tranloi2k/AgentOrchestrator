@@ -91,9 +91,15 @@ test("team validation", () => {
     assert.ok(bad.includes(c), c);
   }
   assert.ok(codes({ type: "team", team: { coordinator: { agentId: "a1" }, members: [] } }).includes("teamEmpty"));
-  assert.ok(
-    codes({ type: "team", team: { coordinator: { agentId: "a1" }, members: [], spawnPolicy: { enabled: true, providers: ["claude"] } } }).includes("teamEmpty"),
-    "without members, spawning needs at least one blueprint"
+  assert.deepEqual(
+    codes({ type: "team", team: { coordinator: { agentId: "a1" }, members: [], spawnPolicy: { enabled: true, providers: ["claude"] } } }),
+    [],
+    "a coordinator that defines its agents itself needs no members and no blueprints"
+  );
+  assert.deepEqual(
+    codes({ type: "team", team: { coordinator: { agentId: "a1" }, members: [], spawnPolicy: { enabled: true } } }),
+    ["spawnNoProviders"],
+    "spawning on with nothing to spawn from is reported once"
   );
   const blueprint = { name: "dev", role: "Builds it", providers: [{ provider: "claude" }] };
   assert.deepEqual(

@@ -1,5 +1,5 @@
 import React from "react";
-import { HelperText } from "./Feedback.jsx";
+import { InfoTip } from "./Feedback.jsx";
 
 export default function CheckboxField({ id, checked, onChange, label, hint, className = "" }) {
   return (
@@ -7,8 +7,8 @@ export default function CheckboxField({ id, checked, onChange, label, hint, clas
       <div className="checkbox-row">
         <input id={id} type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
         <label htmlFor={id}>{label}</label>
+        <InfoTip>{hint}</InfoTip>
       </div>
-      {hint && <HelperText>{hint}</HelperText>}
     </div>
   );
 }

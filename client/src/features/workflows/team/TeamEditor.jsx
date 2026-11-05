@@ -22,6 +22,15 @@ export function memberAgentIds(member) {
  * get an alias, and the alias itself is editable), or "bp:<index>" for a blueprint. Members are
  * optional: a team may run on blueprints alone, its coordinator spawning what the job needs.
  */
+/** What the diagram says when the team has no fixed members, after how its coordinator gets its agents. */
+function noMembersHint(spawn, blueprints) {
+  // Every agent it could create is read-only: the run can't change any code to Accept.
+  if (spawn?.enabled && (spawn.maxAccessLevel || "read") === "read") return "workflows.team.readOnlySpawn";
+  if (spawn?.enabled && spawn.providers?.length) return "workflows.team.noMembersDynamic";
+  if (spawn?.enabled && blueprints.length) return "workflows.team.noMembersBlueprints";
+  return "workflows.team.noMembers";
+}
+
 export default function TeamEditor({ team, agents, onChange }) {
   const { t } = usePreferences();
   const [selected, setSelected] = useState("coordinator");
@@ -78,7 +87,7 @@ export default function TeamEditor({ team, agents, onChange }) {
       blueprints={blueprints.map((b, i) => ({ key: `bp:${i}`, ...b }))}
       onAddBlueprint={addBlueprint}
       addBlueprintLabel={t("workflows.blueprint.add")}
-      hint={!team.members.length ? t(blueprints.length ? "workflows.team.noMembersBlueprints" : "workflows.team.noMembers") : null}
+      hint={!team.members.length ? t(noMembersHint(team.spawnPolicy, blueprints)) : null}
     />
   );
 
@@ -107,13 +116,18 @@ export default function TeamEditor({ team, agents, onChange }) {
   } else if (selected === "spawn") {
     panelTitle = t("workflows.team.spawnCard");
     panelBody = (
-      <SpawnPolicyFields
-        id="teamSpawnEnabled"
-        value={team.spawnPolicy}
-        onChange={(spawnPolicy) => update({ spawnPolicy })}
-        enabledLabel={t("workflows.team.spawn.enabled")}
-        hint={t("workflows.team.spawn.hint")}
-      />
+      <>
+        {team.spawnPolicy?.enabled && (team.spawnPolicy.maxAccessLevel || "read") === "read" && (
+          <HelperText>{t("workflows.team.readOnlySpawn")}</HelperText>
+        )}
+        <SpawnPolicyFields
+          id="teamSpawnEnabled"
+          value={team.spawnPolicy}
+          onChange={(spawnPolicy) => update({ spawnPolicy })}
+          enabledLabel={t("workflows.team.spawn.enabled")}
+          hint={t("workflows.team.spawn.hint")}
+        />
+      </>
     );
   } else if (member) {
     panelTitle = member.alias || t("workflows.team.unnamedMember");
@@ -129,25 +143,25 @@ export default function TeamEditor({ team, agents, onChange }) {
           value={member.alias}
           placeholder={t("workflows.team.alias.placeholder")}
           onChange={(e) => updateMember(selected, { alias: e.target.value.toLowerCase().replace(/\s+/g, "-") })}
+          hint={t("workflows.team.aliasHint")}
         />
-        <HelperText>{t("workflows.team.aliasHint")}</HelperText>
         <MemberAgentList agentIds={memberAgentIds(member)} agents={agents} onChange={(agentIds) => updateMember(selected, { agentIds })} />
         <Textarea
           label={t("workflows.team.role")}
           value={member.role}
           placeholder={t("workflows.team.role.placeholder")}
           onChange={(e) => updateMember(selected, { role: e.target.value })}
+          hint={t("workflows.team.roleHint")}
         />
-        <HelperText>{t("workflows.team.roleHint")}</HelperText>
       </>
     );
   } else {
     panelTitle = t("workflows.team.coordinator");
     panelBody = (
       <>
-        <HelperText>{t("workflows.team.coordinatorHint")}</HelperText>
         <Select
           label={t("workflows.team.coordinatorAgent")}
+          hint={t("workflows.team.coordinatorHint")}
           value={team.coordinator.agentId}
           placeholder={t("workflows.selectAgent")}
           onChange={(e) => updateCoordinator({ agentId: e.target.value })}
@@ -159,8 +173,8 @@ export default function TeamEditor({ team, agents, onChange }) {
           placeholder={t("workflows.team.process.placeholder")}
           value={team.coordinator.process}
           onChange={(e) => updateCoordinator({ process: e.target.value })}
+          hint={t("workflows.team.processHint")}
         />
-        <HelperText>{t("workflows.team.processHint")}</HelperText>
       </>
     );
   }

@@ -44,8 +44,12 @@ const CALLABLE = parseJson(process.env.AGENT_BRIDGE_CALLABLE, []);
 const SPAWN_POLICY = parseJson(process.env.AGENT_BRIDGE_SPAWN_POLICY, null);
 // A Team coordinator with isolation on: each work item a member writes has its own worktree.
 const WORK_ITEMS = process.env.AGENT_BRIDGE_WORK_ITEMS === "1";
-// For a Team coordinator with blueprints: its fixed members and blueprints, and when to use which.
-const TEAM_GUIDE = teamGuide({ members: CALLABLE.filter((n) => n.member), blueprints: SPAWN_POLICY?.blueprints || [] });
+// For a Team coordinator that may spawn: its fixed members, blueprints and self-defined agents, and when to use which.
+const TEAM_GUIDE = teamGuide({
+  members: CALLABLE.filter((n) => n.member),
+  blueprints: SPAWN_POLICY?.blueprints || [],
+  adHoc: (SPAWN_POLICY?.providers || []).length > 0,
+});
 
 /**
  * POSTs JSON to the orchestrator server. Uses node:http rather than fetch on purpose: fetch
@@ -210,7 +214,7 @@ if (SPAWN_POLICY) {
     adHoc && p.providers.includes("gemini") && `- model Gemini (agy): mặc định của CLI (bỏ trống)${p.geminiModels?.length ? ", " + p.geminiModels.join(", ") : ""}`,
     adHoc && `- accessLevel: ${allowedLevels.join(", ")} (read = chỉ đọc, write = sửa trong workspace, full = toàn quyền; bỏ trống = read; tối đa ${p.maxAccessLevel || "read"}${p.ceilingSource === "team" ? " theo cài đặt của Team" : ", quyền của bạn"})`,
     adHoc && p.providers.includes("claude") && `- tool cho agent Claude: ${list(p.toolCeiling)} (bỏ trống "tools" = tất cả tool này; không bao giờ có Task)`,
-    `- tối đa ${p.maxAgents} agent cho cả run (mỗi workItemId của một blueprint tính là 1 agent, dù sửa bao nhiêu vòng)`,
+    `- tối đa ${p.maxAgents} agent cho cả run (mỗi workItemId của một blueprint hoặc một name tính là 1 agent, dù sửa bao nhiêu vòng)`,
     p.tokenBudget ? `- ngân sách ${p.tokenBudget} token (input + output + ghi cache) cho tất cả agent được tạo trong run` : null,
   ]
     .filter(Boolean)
@@ -224,26 +228,26 @@ if (SPAWN_POLICY) {
         "Agent mới KHÔNG thấy hội thoại của bạn: prompt phải tự đầy đủ bối cảnh, mục tiêu và nói rõ cần trả về gì. " +
         "Nhiều lời gọi có thể chạy song song. Không tạo agent cho việc nhỏ bạn tự làm nhanh hơn.\n\n" +
         (blueprints.length
-          ? "Cách ưu tiên: truyền blueprint (một vai trò Team đã định nghĩa sẵn, có hướng dẫn, skill, quyền và thứ tự provider riêng) cùng workItemId. " +
+          ? "Blueprint là một vai trò Team đã định nghĩa sẵn (hướng dẫn, skill, quyền và thứ tự provider riêng): truyền blueprint cùng workItemId. " +
             "Hệ thống tự chọn provider: bỏ qua provider chưa cài hoặc đang hết quota, và tự chuyển sang provider tiếp theo khi provider trước không làm được việc. " +
-            "Gọi lại với CÙNG blueprint và CÙNG workItemId để agent đó làm tiếp/sửa tiếp (nó nhớ các lần trước). Với blueprint, không truyền provider/model/tools/accessLevel.\n" +
-            `${TEAM_GUIDE}\n\n`
+            "Gọi lại với CÙNG blueprint và CÙNG workItemId để agent đó làm tiếp/sửa tiếp (nó nhớ các lần trước). Với blueprint, không truyền name/role/instructions/provider/model/tools/accessLevel.\n"
           : "") +
         (adHoc
-          ? blueprints.length
-            ? "Không có blueprint phù hợp thì có thể tự tạo agent (chọn provider, model, tool), trong giới hạn:\n"
-            : "Chọn provider, model, tool trong giới hạn được phép (hệ thống kiểm tra, ngoài danh sách sẽ bị từ chối):\n"
-          : "Chỉ được tạo agent từ các blueprint ở trên. Giới hạn:\n") +
+          ? (blueprints.length ? "Không có blueprint phù hợp thì tự định nghĩa agent" : "Tự định nghĩa agent cho từng phần việc") +
+            ", như viết một subagent: đặt name (ngắn, kebab-case, vd backend-dev), role (một câu), instructions (system prompt: chuyên môn, cách làm, chuẩn đầu ra), " +
+            "chọn provider/model/accessLevel cần thiết, và workItemId. Gọi lại với CÙNG name và CÙNG workItemId để agent đó làm tiếp/sửa tiếp (nó nhớ các lần trước).\n"
+          : "") +
+        (TEAM_GUIDE ? `${TEAM_GUIDE}\n\n` : "\n") +
+        (adHoc ? "Giới hạn (hệ thống kiểm tra, ngoài danh sách sẽ bị từ chối):\n" : "Chỉ được tạo agent từ các blueprint ở trên. Giới hạn:\n") +
         policyText,
       inputSchema: {
-        ...(blueprints.length
-          ? {
-              blueprint: z.string().optional().describe(`Tên blueprint: ${blueprints.map((b) => b.name).join(", ")}`),
-              workItemId: z.string().min(1).max(80).optional().describe("Bắt buộc khi dùng blueprint: mã ổn định của công việc, giữ nguyên cho các lần làm tiếp/sửa tiếp"),
-            }
-          : {}),
+        ...(blueprints.length ? { blueprint: z.string().optional().describe(`Tên blueprint: ${blueprints.map((b) => b.name).join(", ")}`) } : {}),
+        workItemId: z.string().min(1).max(80).optional().describe("Mã ổn định của công việc, giữ nguyên cho các lần làm tiếp/sửa tiếp. Bắt buộc khi dùng blueprint hoặc name"),
         ...(adHoc
           ? {
+              name: z.string().max(40).optional().describe("Chỉ khi không dùng blueprint. Tên ngắn của agent mới (chữ thường, số, -), vd backend-dev; giữ nguyên để làm tiếp"),
+              role: z.string().max(300).optional().describe("Chỉ khi không dùng blueprint. Vai trò của agent mới, một câu"),
+              instructions: z.string().max(20000).optional().describe("Chỉ khi không dùng blueprint. System prompt cho agent mới: chuyên môn, cách làm, chuẩn đầu ra"),
               provider: z.string().optional().describe(`Chỉ khi không dùng blueprint. Provider của agent mới: ${list(p.providers)}. Bắt buộc nếu được phép nhiều hơn 1 provider.`),
               model: z.string().optional().describe("Chỉ khi không dùng blueprint. Model, bỏ trống để dùng model mặc định của CLI"),
               accessLevel: z.enum(["read", "write", "full"]).optional().describe(`Chỉ khi không dùng blueprint. Mức truy cập: read (mặc định), write hoặc full, tối đa ${p.maxAccessLevel || "read"}. Cần sửa file thì truyền write.`),
@@ -254,13 +258,16 @@ if (SPAWN_POLICY) {
         prompt: z.string().min(1).describe("Nhiệm vụ đầy đủ cho agent mới"),
       },
     },
-    async ({ blueprint, workItemId, provider, model, accessLevel, tools, title, prompt }) => {
+    async ({ blueprint, workItemId, name, role, instructions, provider, model, accessLevel, tools, title, prompt }) => {
       if (!blueprint && !adHoc) return text(`Cần truyền blueprint: ${blueprints.map((b) => b.name).join(", ")}.`, true);
       try {
         const { ok, status, data } = await postJson("/api/internal/spawn-agent", {
           sessionId: SESSION_ID,
           blueprint,
           workItemId,
+          name,
+          role,
+          instructions,
           provider,
           model,
           accessLevel,

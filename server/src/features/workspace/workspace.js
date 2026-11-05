@@ -660,14 +660,15 @@ async function cleanupWorktree(session, wt, { keep, log }) {
  * Callers MUST await these one at a time: `git merge` takes the repo's index lock, and two
  * concurrent merges into the same base branch would either fail on the lock or interleave.
  */
-async function integrateWorktree(session, wt, { title, agentFailed, log, into = null }) {
+async function integrateWorktree(session, wt, { title, message = null, agentFailed, log, into = null }) {
   const target = into || reviewTarget(session);
   if (agentFailed) {
     await cleanupWorktree(session, wt, { keep: session.keepOnFailure, log });
     return { ok: false, reason: "agent_failed" };
   }
 
-  const committed = await commitWorktree(session, wt, `orchestrator: ${title}`.slice(0, 200), log);
+  // `message`: what the agent said it changed (its COMMIT line); else the step's name.
+  const committed = await commitWorktree(session, wt, message || `orchestrator: ${title}`.slice(0, 200), log);
   if (!committed.ok) {
     log(`❌ Không commit được thay đổi trong không gian riêng: ${committed.output || "lỗi git"}`);
     await cleanupWorktree(session, wt, { keep: session.keepOnFailure, log });
@@ -729,12 +730,18 @@ function parseReviewFiles(nameStatusOutput, numstatOutput) {
     });
 }
 
-/** Commits direct edits in the review worktree and freezes a patch for the run history. */
-async function finalizeWorkspaceReview(session, log) {
+/**
+ * Commits direct edits in the review worktree and freezes a patch for the run history.
+ * `messageFor(files)` writes the commit message from what changed (the agents' COMMIT lines,
+ * see runs/commit-message.js); it is kept on the review for the merge on Accept too.
+ */
+async function finalizeWorkspaceReview(session, log, messageFor = null) {
+  const pending = await git(["status", "--porcelain"], session.reviewDir);
+  const pendingFiles = (pending.ok ? pending.output.split("\n") : []).filter(Boolean).map((l) => ({ path: l.slice(3).split(" -> ").pop() }));
   const committed = await commitWorktree(
     session,
     { branch: session.reviewBranch, dir: session.reviewDir },
-    `orchestrator: review ${session.runId}`,
+    messageFor ? messageFor(pendingFiles) : `orchestrator: review ${session.runId}`,
     log
   );
   if (!committed.ok) throw new Error(committed.output || "Không commit được workspace review");
@@ -778,6 +785,7 @@ async function finalizeWorkspaceReview(session, log) {
     // The run started on uncommitted changes: Accept writes into the working folder instead of merging.
     snapshotCommit: session.snapshotCommit || null,
     snapshotRef: session.snapshotRef || null,
+    commitMessage: messageFor ? messageFor(files) : null,
     createdAt: Date.now(),
   };
 }
@@ -872,7 +880,8 @@ async function acceptWorkspaceReview(review) {
     temporary = true;
   }
   try {
-    const merged = await git(["merge", "--no-ff", "--no-edit", "-m", `orchestrator: accept ${review.branch}`, review.branch], mergeDir);
+    const message = review.commitMessage || `orchestrator: accept ${review.branch}`;
+    const merged = await git(["merge", "--no-ff", "--no-edit", "-m", message, review.branch], mergeDir);
     if (!merged.ok) {
       await git(["merge", "--abort"], mergeDir);
       throw new Error(`Không thể apply thay đổi vào ${review.baseBranch}: ${merged.output || "git merge thất bại"}`);

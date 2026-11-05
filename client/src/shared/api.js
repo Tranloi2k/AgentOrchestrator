@@ -57,6 +57,9 @@ export const api = {
     ),
   deleteWorkflow: (id) => fetch(`/api/workflows/${id}`, { method: "DELETE" }).then(json),
 
+  askAssistant: (data) =>
+    fetch("/api/assistant", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json),
+
   getUsage: () => fetch("/api/usage").then(json),
 
   listRuns: () => fetch("/api/runs").then(json),

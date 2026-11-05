@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   IconPlay,
@@ -12,21 +12,22 @@ import {
   IconTranslate,
   IconSun,
   IconMoon,
+  IconSidebar,
 } from "../shared/Icons.jsx";
 import { Button } from "../shared/components/index.js";
 import { usePreferences } from "./PreferencesContext.jsx";
 import { usePageMeta } from "./PageMetaContext.jsx";
 
 const NAV_ITEMS = [
-  { path: "/run", icon: IconPlay, labelKey: "nav.run", descKey: "nav.run.desc" },
-  { path: "/agents", icon: IconAgent, labelKey: "nav.agents", descKey: "nav.agents.desc" },
-  { path: "/skills", icon: IconSkill, labelKey: "nav.skills", descKey: "nav.skills.desc" },
-  { path: "/plugins", icon: IconPlugin, labelKey: "nav.plugins", descKey: "nav.plugins.desc" },
-  { path: "/workflows", icon: IconWorkflow, labelKey: "nav.workflows", descKey: "nav.workflows.desc" },
-  { path: "/usage", icon: IconUsage, labelKey: "nav.usage", descKey: "nav.usage.desc" },
+  { path: "/run", icon: IconPlay, labelKey: "nav.run" },
+  { path: "/agents", icon: IconAgent, labelKey: "nav.agents" },
+  { path: "/skills", icon: IconSkill, labelKey: "nav.skills" },
+  { path: "/plugins", icon: IconPlugin, labelKey: "nav.plugins" },
+  { path: "/workflows", icon: IconWorkflow, labelKey: "nav.workflows" },
+  { path: "/usage", icon: IconUsage, labelKey: "nav.usage" },
 ];
 
-const DOCS_ITEM = { path: "/docs", icon: IconBook, labelKey: "nav.docs", descKey: "nav.docs.desc" };
+const DOCS_ITEM = { path: "/docs", icon: IconBook, labelKey: "nav.docs" };
 
 function isNavActive(path, pathname) {
   if (path === "/run") return pathname === path || pathname.startsWith(`${path}/`);
@@ -43,6 +44,33 @@ export default function Layout() {
   const { locale, setLocale, theme, setTheme, t } = usePreferences();
   const { meta } = usePageMeta();
   const current = matchNavItem(location.pathname);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("sidebarCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("sidebarCollapsed", sidebarCollapsed ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [sidebarCollapsed]);
+
+  // Ctrl/Cmd+B toggles the sidebar, as in most editors.
+  useEffect(() => {
+    function onKeyDown(e) {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setSidebarCollapsed((c) => !c);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   function toggleLocale() {
     setLocale(locale === "vi" ? "en" : "vi");
@@ -53,18 +81,26 @@ export default function Layout() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar-nav">
         <div className="sidebar-brand">
-          <IconLogo size={28} title={t("app.brand")} />
+          <IconLogo size={26} title={`${t("app.brand")} · ${t("app.version")}`} />
           <div className="sidebar-brand-text">
             <span className="sidebar-brand-name">{t("app.brand")}</span>
-            <span className="sidebar-brand-sub">{t("app.subtitle")}</span>
           </div>
+          <button
+            type="button"
+            className="sidebar-toggle-btn"
+            onClick={() => setSidebarCollapsed((c) => !c)}
+            title={`${t(sidebarCollapsed ? "settings.showSidebar" : "settings.hideSidebar")} (Ctrl+B)`}
+            aria-label={t(sidebarCollapsed ? "settings.showSidebar" : "settings.hideSidebar")}
+            aria-expanded={!sidebarCollapsed}
+          >
+            <IconSidebar />
+          </button>
         </div>
 
         <nav className="sidebar-menu">
-          <div className="sidebar-section-label">{t("nav.section")}</div>
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const active = isNavActive(item.path, location.pathname);
@@ -74,6 +110,8 @@ export default function Layout() {
                 type="button"
                 className={`nav-item ${active ? "active" : ""}`}
                 onClick={() => navigate(item.path)}
+                title={sidebarCollapsed ? t(item.labelKey) : undefined}
+                aria-label={t(item.labelKey)}
               >
                 <span className="nav-item-icon">
                   <Icon size={16} />
@@ -89,22 +127,20 @@ export default function Layout() {
             type="button"
             className={`nav-item ${isNavActive(DOCS_ITEM.path, location.pathname) ? "active" : ""}`}
             onClick={() => navigate(DOCS_ITEM.path)}
+            title={sidebarCollapsed ? t(DOCS_ITEM.labelKey) : undefined}
+            aria-label={t(DOCS_ITEM.labelKey)}
           >
             <span className="nav-item-icon">
               <IconBook size={16} />
             </span>
             <span className="nav-item-label">{t(DOCS_ITEM.labelKey)}</span>
           </button>
-          <div className="sidebar-version">{t("app.version")}</div>
         </div>
       </aside>
 
       <div className="app-main">
         <header className="page-header">
-          <div className="page-header-text">
-            <h1 className="page-title">{meta?.title ?? t(current.labelKey)}</h1>
-            <p className="page-subtitle">{meta?.subtitle ?? t(current.descKey)}</p>
-          </div>
+          <h1 className="page-title">{meta?.title ?? t(current.labelKey)}</h1>
           <div className="page-header-actions">
             <Button
               variant="headerIcon"

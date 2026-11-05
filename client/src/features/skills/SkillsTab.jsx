@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../shared/api.js";
+import { IconEdit, IconTrash } from "../../shared/Icons.jsx";
 import { usePreferences } from "../../app/PreferencesContext.jsx";
-import { Button, ConfirmModal, FormActions, InfoBanner, TabPageHeader } from "../../shared/components/index.js";
+import { Button, ConfirmModal, TabPageHeader } from "../../shared/components/index.js";
 
 export default function SkillsTab() {
   const navigate = useNavigate();
@@ -50,26 +51,54 @@ export default function SkillsTab() {
 
   return (
     <div className="tab-content">
-      <TabPageHeader title={t("skills.title")} actionLabel={t("skills.create")} onAction={() => navigate("/skills/new")} />
-      <InfoBanner>{t("skills.banner")}</InfoBanner>
+      <TabPageHeader hint={t("skills.banner")} actionLabel={t("skills.create")} onAction={() => navigate("/skills/new")} />
 
-      <div className="card-grid">
-        {skills.map((s) => (
-          <div key={s.id} className="entity-card">
-            <div className="entity-card-title">{s.name}</div>
-            <div className="entity-card-desc">{s.description}</div>
-            <div className="entity-card-meta">{t("skills.usedBy", { count: usedByCount(s.id) })}</div>
-            <FormActions>
-              <Button variant="secondary" onClick={() => navigate(`/skills/${s.id}`)}>
-                {t("common.edit")}
-              </Button>
-              <Button variant="secondary" color="danger" onClick={() => setConfirmTarget(s)}>
-                {t("common.delete")}
-              </Button>
-            </FormActions>
-          </div>
-        ))}
-        {!skills.length && <div className="flow-desc">{t("skills.empty")}</div>}
+      <div className="entity-table-wrap">
+        {skills.length ? (
+          <table className="entity-table">
+            <colgroup>
+              <col style={{ width: "22%" }} />
+              <col />
+              <col style={{ width: 260 }} />
+              <col style={{ width: 96 }} />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>{t("list.col.name")}</th>
+                <th>{t("list.col.description")}</th>
+                <th>{t("list.col.usedBy")}</th>
+                <th aria-label={t("list.col.actions")} />
+              </tr>
+            </thead>
+            <tbody>
+              {skills.map((s) => (
+                <tr key={s.id}>
+                  <td title={s.name}>
+                    <div className="entity-table-name" onClick={() => navigate(`/skills/${s.id}`)}>
+                      <span className="entity-table-name-text">{s.name}</span>
+                    </div>
+                  </td>
+                  <td className="entity-table-desc" title={s.description}>{s.description}</td>
+                  <td className="entity-table-meta" title={usedBy(s.id).join(", ")}>
+                    {t("skills.usedBy", { count: usedByCount(s.id) })}
+                  </td>
+                  <td>
+                    <div className="entity-table-actions">
+                      <Button variant="icon" title={t("common.edit")} aria-label={t("common.edit")} onClick={() => navigate(`/skills/${s.id}`)}>
+                        <IconEdit />
+                      </Button>
+                      <Button variant="icon" color="danger" title={t("common.delete")} aria-label={t("common.delete")} onClick={() => setConfirmTarget(s)}>
+                        <IconTrash />
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="flow-desc entity-table-empty">{t("skills.empty")}</div>
+        )}
       </div>
 
       {confirmTarget && (

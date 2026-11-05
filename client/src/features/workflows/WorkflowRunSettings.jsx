@@ -123,11 +123,11 @@ export default function WorkflowRunSettings({ form, setForm, workflowId }) {
                 min={0}
                 step={100000}
                 label={t("workflows.teamLimits.tokens")}
+                hint={t("workflows.teamLimits.hint")}
                 value={teamLimits.runTokenBudget}
                 onChange={(e) => setTeamLimits({ runTokenBudget: Number(e.target.value) })}
               />
             </DetailFieldGrid>
-            <HelperText>{t("workflows.teamLimits.hint")}</HelperText>
           </>
         )}
       </DetailSection>

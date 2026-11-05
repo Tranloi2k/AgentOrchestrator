@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { api } from "../../../shared/api.js";
 import { IconClose, ProviderIcon } from "../../../shared/Icons.jsx";
 import { usePreferences } from "../../../app/PreferencesContext.jsx";
-import { Button, HelperText } from "../../../shared/components/index.js";
+import { Button, InfoTip } from "../../../shared/components/index.js";
 
 // Same cap as MAX_MEMBER_AGENTS in server/src/features/workflows/workflow-model.js.
 const MAX_AGENTS = 6;
@@ -28,7 +28,10 @@ export default function MemberAgentList({ agentIds, agents, onChange }) {
 
   return (
     <>
-      <div className="field-label">{t("workflows.team.memberAgents")}</div>
+      <div className="field-label label-with-tip">
+        {t("workflows.team.memberAgents")}
+        <InfoTip>{t("workflows.team.memberAgents.hint")}</InfoTip>
+      </div>
       {agentIds.map((id, i) => {
         const agent = agents.find((a) => a.id === id);
         const provider = agent?.provider || "claude";
@@ -67,7 +70,6 @@ export default function MemberAgentList({ agentIds, agents, onChange }) {
           ))}
         </select>
       )}
-      <HelperText>{t("workflows.team.memberAgents.hint")}</HelperText>
     </>
   );
 }

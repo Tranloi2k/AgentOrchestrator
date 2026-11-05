@@ -20,7 +20,8 @@ import { getAgent } from "../agents/agents.store.js";
 import { getSkill } from "../skills/skills.store.js";
 import { getPlugin } from "../plugins/plugins.store.js";
 import { nodeTitle } from "../workflows/node-title.js";
-import { pushTaskLog, setClaudeQuota } from "./run-store.js";
+import { pushTaskLog, setClaudeQuota, runs } from "./run-store.js";
+import { commitInstruction } from "./commit-message.js";
 
 /** --------------------------- stopping a run --------------------------- */
 
@@ -162,8 +163,10 @@ function buildAgentBridgeContext(agent, node, workflow, { runId, taskId, cwd, de
   const sessionId = randomBytes(16).toString("hex");
   bridgeSessions.set(sessionId, { runId, taskId, agent, depth, cwd, nodeId: node?.id || null });
   // A Team coordinator with isolation on merges its members' work items itself (complete_work_item).
-  // Its blueprint spawns that write get work-item worktrees too, so a team without fixed members needs it as well.
-  const workItems = node?.teamRole === "coordinator" && !!workflow?.isolation?.enabled && (callable.length > 0 || (!!spawnPolicy && (agent.blueprints || []).length > 0));
+  // Its spawns per work item (blueprints, or agents it defines itself from the allowed providers) that
+  // write get work-item worktrees too, so a team without fixed members needs it as well.
+  const spawnsWorkItems = !!spawnPolicy && ((agent.blueprints || []).length > 0 || (spawnPolicy.providers || []).length > 0);
+  const workItems = node?.teamRole === "coordinator" && !!workflow?.isolation?.enabled && (callable.length > 0 || spawnsWorkItems);
 
   return {
     AGENT_BRIDGE_URL: `http://${bridgeHost()}:${process.env.PORT || 5175}`,
@@ -303,6 +306,14 @@ const RUNNERS = { claude: runClaudeProcess, codex: runCodexProcess, gemini: runA
  * provider-agnostic. `node`/`workflow`/`depth` (the agent bridge) apply to every provider;
  * only `extraArgs` is claude-specific. */
 function runAgentProcess(opts) {
+  // In a run with a review branch, an agent that may change files (and the coordinator, who sums
+  // up the team's work) ends its answer with a COMMIT line: the review commit's message.
+  const leads = opts.node?.teamRole === "coordinator";
+  if (runs.get(opts.runId)?.reviewOpen && (leads || (opts.agent?.accessLevel && opts.agent.accessLevel !== "read")) && opts.prompt) {
+    opts = { ...opts, prompt: `${opts.prompt}
+
+${commitInstruction()}` };
+  }
   const provider = RUNNERS[opts.agent?.provider] ? opts.agent.provider : "claude";
   // Defense in depth: the UI already refuses to let you pick an unavailable provider (see
   // PROVIDER_AVAILABILITY / /api/meta), but an agent saved before a CLI was uninstalled — or

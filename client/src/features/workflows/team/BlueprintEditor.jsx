@@ -1,7 +1,7 @@
 import React from "react";
 import { IconClose, ProviderIcon } from "../../../shared/Icons.jsx";
 import { usePreferences } from "../../../app/PreferencesContext.jsx";
-import { Button, CheckboxField, ChipSelect, HelperText, Select, Textarea, TextInput } from "../../../shared/components/index.js";
+import { Button, CheckboxField, ChipSelect, InfoTip, Select, Textarea, TextInput } from "../../../shared/components/index.js";
 import { DetailField } from "../../../shared/components/DetailLayout.jsx";
 
 const PROVIDERS = ["claude", "codex", "gemini"];
@@ -47,7 +47,10 @@ function BlueprintProviderList({ providers, meta, onChange }) {
 
   return (
     <>
-      <div className="field-label">{t("workflows.blueprint.providers")}</div>
+      <div className="field-label label-with-tip">
+        {t("workflows.blueprint.providers")}
+        <InfoTip>{t("workflows.blueprint.providers.hint")}</InfoTip>
+      </div>
       {providers.map((p, i) => {
         const installed = availability[p.provider] !== false;
         return (
@@ -99,7 +102,6 @@ function BlueprintProviderList({ providers, meta, onChange }) {
           ))}
         </select>
       )}
-      <HelperText>{t("workflows.blueprint.providers.hint")}</HelperText>
     </>
   );
 }
@@ -132,15 +134,15 @@ export default function BlueprintEditor({ blueprint, maxAccessLevel = "read", sk
         value={b.name}
         placeholder={t("workflows.blueprint.name.placeholder")}
         onChange={(e) => set({ name: e.target.value.toLowerCase().replace(/\s+/g, "-") })}
+        hint={t("workflows.blueprint.nameHint")}
       />
-      <HelperText>{t("workflows.blueprint.nameHint")}</HelperText>
       <TextInput
         label={t("workflows.blueprint.role")}
         value={b.role}
         placeholder={t("workflows.blueprint.role.placeholder")}
         onChange={(e) => set({ role: e.target.value })}
+        hint={t("workflows.blueprint.roleHint")}
       />
-      <HelperText>{t("workflows.blueprint.roleHint")}</HelperText>
       <Textarea
         label={t("workflows.blueprint.instructions")}
         size="lg"
@@ -166,8 +168,8 @@ export default function BlueprintEditor({ blueprint, maxAccessLevel = "read", sk
           const tools = accessLevel === "read" && b.tools ? b.tools.filter((tool) => !WRITE_TOOLS.includes(tool)) : b.tools;
           set({ accessLevel, tools });
         }}
+        hint={t("workflows.blueprint.accessHint", { max: t(`agents.access.${maxAccessLevel}`) })}
       />
-      <HelperText>{t("workflows.blueprint.accessHint", { max: t(`agents.access.${maxAccessLevel}`) })}</HelperText>
       <BlueprintProviderList providers={b.providers} meta={meta} onChange={(providers) => set({ providers })} />
       {usesClaude && (
         <>
@@ -176,13 +178,13 @@ export default function BlueprintEditor({ blueprint, maxAccessLevel = "read", sk
             checked={Array.isArray(b.tools)}
             onChange={(on) => set({ tools: on ? toolOptions.map((o) => o.value) : null })}
             label={t("workflows.blueprint.limitTools")}
+            hint={t("workflows.blueprint.toolsHint")}
           />
           {Array.isArray(b.tools) && (
             <DetailField label={t("workflows.blueprint.tools")} full>
               <ChipSelect options={toolOptions} selected={b.tools} onChange={(tools) => set({ tools })} />
             </DetailField>
           )}
-          <HelperText>{t("workflows.blueprint.toolsHint")}</HelperText>
         </>
       )}
     </>

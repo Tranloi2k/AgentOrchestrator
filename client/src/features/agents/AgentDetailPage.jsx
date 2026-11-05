@@ -10,7 +10,9 @@ import {
   CheckboxField,
   ChipSelect,
   HelperText,
+  InfoTip,
   ErrorBox,
+  AssistantPanel,
 } from "../../shared/components/index.js";
 import ToolPermissionSelect from "./ToolPermissionSelect.jsx";
 
@@ -60,6 +62,7 @@ export default function AgentDetailPage() {
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [beforeAssistant, setBeforeAssistant] = useState(null); // the form before the AI's last change
 
   useEffect(() => {
     api.meta().then((d) => {
@@ -117,6 +120,17 @@ export default function AgentDetailPage() {
       title: renamed ? t(renamed.titleKey) : undefined,
     };
   });
+
+  function applyAssistantProposal(proposal) {
+    setBeforeAssistant(form);
+    setForm((f) => ({ ...f, ...proposal }));
+  }
+
+  function undoAssistant() {
+    if (!beforeAssistant) return;
+    setForm(beforeAssistant);
+    setBeforeAssistant(null);
+  }
 
   async function handleSave() {
     setError("");
@@ -183,11 +197,19 @@ export default function AgentDetailPage() {
         { label: isNew ? t("agents.form.create") : form.name || "..." },
       ]}
       title={title}
-      subtitle={t("nav.agents.desc")}
       error={error}
       saving={saving}
       onSave={handleSave}
       onCancel={() => navigate("/agents")}
+      aside={
+        <AssistantPanel
+          target="agent"
+          draft={form}
+          onApply={applyAssistantProposal}
+          onUndo={undoAssistant}
+          canUndo={!!beforeAssistant}
+        />
+      }
     >
       <DetailSection title={t("detail.section.general")}>
         <DetailFieldGrid>
@@ -197,9 +219,9 @@ export default function AgentDetailPage() {
             value={form.provider}
             onChange={(e) => setForm({ ...form, provider: e.target.value, model: "" })}
             options={providerOptions}
+            hint={t("agents.provider.hint")}
           />
         </DetailFieldGrid>
-        <HelperText>{t("agents.provider.hint")}</HelperText>
         {!providerAvailability[form.provider] && (
           <ErrorBox>{t("agents.provider.unavailableWarning", { name: t(`agents.provider.${form.provider}`) })}</ErrorBox>
         )}
@@ -223,20 +245,21 @@ export default function AgentDetailPage() {
         />
         <HelperText>{t(`agents.access.${form.accessLevel}.desc.${form.provider}`)}</HelperText>
         <details className="advanced-settings">
-          <summary>{t("agents.access.advanced")}</summary>
-          <div className="advanced-settings-body">
-            {advanced}
-            <HelperText>{t("agents.access.advancedHint")}</HelperText>
-          </div>
+          <summary>
+            <span className="label-with-tip">
+              {t("agents.access.advanced")}
+              <InfoTip>{t("agents.access.advancedHint")}</InfoTip>
+            </span>
+          </summary>
+          <div className="advanced-settings-body">{advanced}</div>
         </details>
       </DetailSection>
 
       {isClaude && (
         <DetailSection title={t("detail.section.tools")}>
-          <DetailField label={t("agents.toolPermissions")} full>
+          <DetailField label={t("agents.toolPermissions")} hint={t("agents.toolPermissions.hint")} full>
             <ToolPermissionSelect options={toolOptions} allowed={form.allowedTools} onChange={(allowedTools) => setForm((f) => ({ ...f, allowedTools }))} />
           </DetailField>
-          <HelperText>{t("agents.toolPermissions.hint")}</HelperText>
           {form.allowedTools.includes(SUBAGENT_TOOL) && <HelperText>{t("agents.tool.subagent.enabled")}</HelperText>}
         </DetailSection>
       )}

@@ -18,6 +18,7 @@ import * as workflows from "./features/workflows/workflows.routes.js";
 import * as runs from "./features/runs/runs.routes.js";
 import * as bridge from "./features/bridge/bridge.routes.js";
 import * as schedules from "./features/schedules/schedules.routes.js";
+import * as assistant from "./features/assistant/assistant.routes.js";
 
 const PORT = process.env.PORT || 5175;
 
@@ -26,7 +27,7 @@ app.use(requestGuard);
 app.use(cors({ origin: ALLOWED_ORIGINS }));
 app.use(express.json());
 
-for (const feature of [meta, workspace, agents, skills, plugins, workflows, runs, bridge, schedules]) feature.register(app);
+for (const feature of [meta, workspace, agents, skills, plugins, workflows, runs, bridge, schedules, assistant]) feature.register(app);
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws", verifyClient: verifyWsClient });

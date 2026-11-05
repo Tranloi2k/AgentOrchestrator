@@ -13,7 +13,7 @@ function readStorage(key, fallback) {
 
 export function PreferencesProvider({ children }) {
   const [locale, setLocale] = useState(() => readStorage("locale", "vi"));
-  const [theme, setTheme] = useState(() => readStorage("theme", "light"));
+  const [theme, setTheme] = useState(() => readStorage("theme", "dark"));
 
   useEffect(() => {
     document.documentElement.setAttribute("lang", locale);

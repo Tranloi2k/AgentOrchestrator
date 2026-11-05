@@ -7,7 +7,7 @@ const blueprints = [
   { name: "writer", role: "Writes copy", accessLevel: "read", providers: ["claude"] },
 ];
 
-test("teamGuide: nothing to add without blueprints", () => {
+test("teamGuide: nothing to add without blueprints or providers to spawn from", () => {
   assert.equal(teamGuide({ members: [{ id: "dev" }] }), "");
   assert.equal(teamGuide(), "");
 });
@@ -26,4 +26,16 @@ test("teamGuide: with members it lists both and says when to use which", () => {
   assert.match(text, /vị trí cố định/);
   assert.match(text, /spawn_agent với blueprint \+ workItemId/);
   assert.match(text, /blueprint="painter"/);
+});
+
+test("teamGuide: a team that may define its own agents is told how", () => {
+  const alone = teamGuide({ members: [], adHoc: true });
+  assert.match(alone, /KHÔNG có thành viên cố định/);
+  assert.match(alone, /name \+ role \+ instructions \+ workItemId/);
+  assert.doesNotMatch(alone, /Blueprint:/);
+
+  const both = teamGuide({ members: [{ id: "fe" }], blueprints, adHoc: true });
+  assert.match(both, /ask_agent, agentId = "fe"/);
+  assert.match(both, /khi có blueprint hợp vai trò; không có thì tự định nghĩa agent/);
+  assert.match(both, /blueprint="painter"/);
 });

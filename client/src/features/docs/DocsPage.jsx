@@ -9,7 +9,7 @@ import { usePageMeta } from "../../app/PageMetaContext.jsx";
 const CONTENT = {
   vi: {
     title: "Hướng dẫn sử dụng",
-    subtitle: "Tài liệu tổng quan cho Agents Orchestrator",
+    subtitle: "Tài liệu tổng quan cho AgentsOrchestrator",
     sections: [
       {
         id: "overview",
@@ -199,7 +199,7 @@ const CONTENT = {
   },
   en: {
     title: "Usage guide",
-    subtitle: "Overview documentation for Agents Orchestrator",
+    subtitle: "Overview documentation for AgentsOrchestrator",
     sections: [
       {
         id: "overview",

@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../shared/api.js";
-import { ProviderIcon } from "../../shared/Icons.jsx";
+import { IconCopy, IconEdit, IconTrash, ProviderIcon } from "../../shared/Icons.jsx";
 import { usePreferences } from "../../app/PreferencesContext.jsx";
-import { Button, ConfirmModal, FormActions, TabPageHeader } from "../../shared/components/index.js";
+import { Button, ConfirmModal, TabPageHeader } from "../../shared/components/index.js";
 
 export default function AgentsTab() {
   const navigate = useNavigate();
@@ -73,59 +73,86 @@ export default function AgentsTab() {
     <div className="tab-content">
       <TabPageHeader title={t("nav.agents")} actionLabel={t("agents.create")} onAction={() => navigate("/agents/new")} />
 
-      <div className="card-grid">
-        {agents.map((a) => (
-          <div key={a.id} className="entity-card">
-            <div className="entity-card-title">
-              <ProviderIcon
-                provider={a.provider || "claude"}
-                title={t(`agents.provider.${a.provider || "claude"}`)}
-              />
-              <span className="entity-card-title-text">{a.name}</span>
-            </div>
-            <div className="entity-card-tags">
-              <span className={`card-tag card-tag-access-${a.accessLevel || "write"}`}>{t(`agents.access.${a.accessLevel || "write"}`)}</span>
-              {!providerAvailability[a.provider || "claude"] && (
-                <span
-                  className="card-tag card-tag-error"
-                  title={t("agents.provider.unavailableWarning", { name: t(`agents.provider.${a.provider || "claude"}`) })}
-                >
-                  {t("agents.provider.notInstalled")}
-                </span>
-              )}
-            </div>
-            <div className="entity-card-desc">{a.description}</div>
-            <div className="entity-card-meta">
-              {t("agents.meta.model")}: {a.model || t("common.default")}
-            </div>
-            {(a.provider || "claude") === "claude" && (
-              <div className="entity-card-meta">
-                {t("agents.meta.allow")}: {(a.allowedTools || []).join(", ") || "-"}
-              </div>
-            )}
-            {!!a.skillIds?.length && (
-              <div className="entity-card-meta">
-                {t("agents.meta.skills")}: {a.skillIds.map((sid) => skills.find((s) => s.id === sid)?.name || "?").join(", ")}
-              </div>
-            )}
-            {!!a.pluginIds?.length && (
-              <div className="entity-card-meta">
-                {t("agents.meta.plugins")}: {a.pluginIds.map((pid) => plugins.find((p) => p.id === pid)?.name || "?").join(", ")}
-              </div>
-            )}
-            <FormActions>
-              <Button variant="secondary" onClick={() => navigate(`/agents/${a.id}`)}>
-                {t("common.edit")}
-              </Button>
-              <Button variant="secondary" onClick={() => setDuplicateTarget(a)}>
-                {t("common.duplicate")}
-              </Button>
-              <Button variant="secondary" color="danger" onClick={() => askDelete(a)}>
-                {t("common.delete")}
-              </Button>
-            </FormActions>
-          </div>
-        ))}
+      <div className="entity-table-wrap">
+        <table className="entity-table">
+          <colgroup>
+            <col style={{ width: "18%" }} />
+            <col style={{ width: 150 }} />
+            <col />
+            <col style={{ width: 130 }} />
+            <col style={{ width: "14%" }} />
+            <col style={{ width: "16%" }} />
+            <col style={{ width: 132 }} />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>{t("list.col.name")}</th>
+              <th>{t("list.col.tags")}</th>
+              <th>{t("list.col.description")}</th>
+              <th>{t("list.col.model")}</th>
+              <th>{t("list.col.tools")}</th>
+              <th>{t("list.col.skillsPlugins")}</th>
+              <th aria-label={t("list.col.actions")} />
+            </tr>
+          </thead>
+          <tbody>
+            {agents.map((a) => {
+              const model = a.model || t("common.default");
+              const tools = (a.provider || "claude") === "claude" ? (a.allowedTools || []).join(", ") || "-" : "-";
+              const extras = [
+                a.skillIds?.length &&
+                  `${t("agents.meta.skills")}: ${a.skillIds.map((sid) => skills.find((s) => s.id === sid)?.name || "?").join(", ")}`,
+                a.pluginIds?.length &&
+                  `${t("agents.meta.plugins")}: ${a.pluginIds.map((pid) => plugins.find((p) => p.id === pid)?.name || "?").join(", ")}`,
+              ]
+                .filter(Boolean)
+                .join(" · ") || "-";
+              return (
+                <tr key={a.id}>
+                  <td title={a.name}>
+                    <div className="entity-table-name" onClick={() => navigate(`/agents/${a.id}`)}>
+                      <ProviderIcon
+                        provider={a.provider || "claude"}
+                        title={t(`agents.provider.${a.provider || "claude"}`)}
+                      />
+                      <span className="entity-table-name-text">{a.name}</span>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="entity-table-tags">
+                      <span className={`card-tag card-tag-access-${a.accessLevel || "write"}`}>{t(`agents.access.${a.accessLevel || "write"}`)}</span>
+                      {!providerAvailability[a.provider || "claude"] && (
+                        <span
+                          className="card-tag card-tag-error"
+                          title={t("agents.provider.unavailableWarning", { name: t(`agents.provider.${a.provider || "claude"}`) })}
+                        >
+                          {t("agents.provider.notInstalled")}
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="entity-table-desc" title={a.description}>{a.description}</td>
+                  <td className="entity-table-meta" title={model}>{model}</td>
+                  <td className="entity-table-meta" title={tools}>{tools}</td>
+                  <td className="entity-table-meta" title={extras}>{extras}</td>
+                  <td>
+                    <div className="entity-table-actions">
+                      <Button variant="icon" title={t("common.edit")} aria-label={t("common.edit")} onClick={() => navigate(`/agents/${a.id}`)}>
+                        <IconEdit />
+                      </Button>
+                      <Button variant="icon" title={t("common.duplicate")} aria-label={t("common.duplicate")} onClick={() => setDuplicateTarget(a)}>
+                        <IconCopy />
+                      </Button>
+                      <Button variant="icon" color="danger" title={t("common.delete")} aria-label={t("common.delete")} onClick={() => askDelete(a)}>
+                        <IconTrash />
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
 
       {confirmTarget && (

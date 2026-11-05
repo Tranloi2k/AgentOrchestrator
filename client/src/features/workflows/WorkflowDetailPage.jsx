@@ -16,13 +16,17 @@ import {
   CheckboxField,
   ChipSelect,
   HelperText,
+  InfoTip,
+  AssistantPanel,
 } from "../../shared/components/index.js";
 import { BLANK_SPAWN_POLICY } from "./team/SpawnPolicyFields.jsx";
 
 const BLANK_TEAM = {
   coordinator: { agentId: "", process: "" },
   members: [],
-  spawnPolicy: BLANK_SPAWN_POLICY,
+  // A new team can run on its coordinator alone: it defines the agents the job needs itself, and
+  // they may edit code (a run works in its own review worktree; nothing lands until Accept).
+  spawnPolicy: { ...BLANK_SPAWN_POLICY, enabled: true, providers: ["claude"], maxAccessLevel: "write" },
   blueprints: [],
   limits: DEFAULT_TEAM_LIMITS,
 };
@@ -77,6 +81,7 @@ export default function WorkflowDetailPage() {
   const [branchTarget, setBranchTarget] = useState("__new__");
   const [panelTab, setPanelTab] = useState("trigger");
   const [idCopied, setIdCopied] = useState(false);
+  const [beforeAssistant, setBeforeAssistant] = useState(null); // the form before the AI's last change
 
   useEffect(() => {
     api.listAgents().then((d) => setAgents(d.agents));
@@ -203,6 +208,27 @@ export default function WorkflowDetailPage() {
     return node ? `${agentName(node.agentId)} (${nodeId})` : nodeId;
   }
 
+  /** The assistant's proposal replaces the form; nodes it kept (same id) stay where they were on the canvas. */
+  function applyAssistantProposal(proposal) {
+    setBeforeAssistant(form);
+    setForm((f) => {
+      const placed = new Map(f.nodes.map((n) => [n.id, n]));
+      const nodes = (proposal.nodes || []).map((n) => {
+        const old = placed.get(n.id);
+        return typeof n.x !== "number" && typeof old?.x === "number" ? { ...n, x: old.x, y: old.y } : n;
+      });
+      return { ...BLANK, ...f, ...proposal, type: f.type || proposal.type, nodes, team: { ...BLANK_TEAM, ...(proposal.team || f.team) } };
+    });
+    setSelected(null);
+  }
+
+  function undoAssistant() {
+    if (!beforeAssistant) return;
+    setForm(beforeAssistant);
+    setBeforeAssistant(null);
+    setSelected(null);
+  }
+
   async function handleSave() {
     setError("");
     setErrorList([]);
@@ -293,10 +319,10 @@ export default function WorkflowDetailPage() {
           <TextInput
             label={t("workflows.isolation.testCommand")}
             placeholder={t("workflows.isolation.testCommand.placeholder")}
+            hint={t("workflows.isolation.testCommandHint")}
             value={isolation.testCommand || ""}
             onChange={(e) => updateIsolation({ testCommand: e.target.value })}
           />
-          <HelperText>{t("workflows.isolation.testCommandHint")}</HelperText>
           <CheckboxField
             id="isolationKeepOnFailure"
             checked={isolation.keepOnFailure !== false}
@@ -373,17 +399,15 @@ export default function WorkflowDetailPage() {
                     { value: "agent", label: t("workflows.nodeType.agent") },
                     { value: "router", label: t("workflows.nodeType.router") },
                   ]}
+                  hint={selectedNode.kind === "router" ? t("workflows.routerHint") : undefined}
                 />
-                {selectedNode.kind === "router" && <HelperText className="node-panel-hint">{t("workflows.routerHint")}</HelperText>}
                 <TextInput
                   label={t("workflows.nodeName")}
                   value={selectedNode.name || ""}
                   placeholder={t("workflows.nodeName.placeholder")}
+                  hint={selectedNode.name ? t("workflows.nodeName.hintSet", { ref: `{{nodes.${selectedNode.name}}}` }) : t("workflows.nodeName.hint")}
                   onChange={(e) => updateNode(selectedNode.id, { name: e.target.value.toLowerCase().replace(/\s+/g, "-") })}
                 />
-                <HelperText className="node-panel-hint">
-                  {selectedNode.name ? t("workflows.nodeName.hintSet", { ref: `{{nodes.${selectedNode.name}}}` }) : t("workflows.nodeName.hint")}
-                </HelperText>
                 <Textarea
                   label={t("workflows.stepPrompt")}
                   placeholder={t("workflows.stepPrompt.placeholder")}
@@ -486,8 +510,10 @@ export default function WorkflowDetailPage() {
 
                 {panelTab === "reliability" && (
                   <div className="node-panel-section">
-                    <HelperText className="node-panel-hint">{t("workflows.reliability.hint")}</HelperText>
-                    <div className="field-label">{t("workflows.fallbackAgents")}</div>
+                    <div className="field-label label-with-tip">
+                      {t("workflows.fallbackAgents")}
+                      <InfoTip>{t("workflows.reliability.hint")}</InfoTip>
+                    </div>
                     {(selectedNode.fallbackAgentIds || []).map((fid, i) => (
                       <div key={fid} className="branch-row">
                         <span className="branch-target">
@@ -539,6 +565,7 @@ export default function WorkflowDetailPage() {
                         type="number"
                         min={0}
                         label={t("workflows.nodeTimeout")}
+                        hint={t("workflows.reliability.limitsHint")}
                         value={selectedNode.timeoutSec ?? 0}
                         onChange={(e) => updateNode(selectedNode.id, { timeoutSec: Number(e.target.value) })}
                       />
@@ -551,7 +578,6 @@ export default function WorkflowDetailPage() {
                         onChange={(e) => updateNode(selectedNode.id, { tokenBudget: Number(e.target.value) })}
                       />
                     </DetailFieldGrid>
-                    <HelperText className="node-panel-hint">{t("workflows.reliability.limitsHint")}</HelperText>
                   </div>
                 )}
 
@@ -597,12 +623,21 @@ export default function WorkflowDetailPage() {
         { label: isNew ? t("workflows.form.create") : form.name || "..." },
       ]}
       title={title}
-      subtitle={t("nav.workflows.desc")}
       error={errorBox}
       saving={saving}
       wide
       onSave={handleSave}
       onCancel={() => navigate("/workflows")}
+      aside={
+        <AssistantPanel
+          target="workflow"
+          draft={form}
+          onApply={applyAssistantProposal}
+          onUndo={undoAssistant}
+          canUndo={!!beforeAssistant}
+          formatErrors={(errors) => formatErrors(errors, { t, nodeLabel })}
+        />
+      }
     >
       {!form.type ? (
         typePicker

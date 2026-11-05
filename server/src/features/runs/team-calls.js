@@ -35,8 +35,9 @@ import {
   reserveDelegation,
 } from "./delegation-policy.js";
 import { addUsage, runTokens } from "./run-usage.js";
-import { blueprintSpawnKey, buildBlueprintAgent, checkSpawnLimits, spawnedCount, spawnedTokens } from "./spawn-policy.js";
+import { blueprintSpawnKey, buildBlueprintAgent, buildInlineBlueprint, checkSpawnLimits, spawnedCount, spawnedTokens } from "./spawn-policy.js";
 import { openItemWorktree, integrateWorktree } from "../workspace/workspace.js";
+import { extractCommitLine } from "./commit-message.js";
 
 /** Providers whose CLI can continue an earlier session: claude --resume, agy --conversation. */
 const RESUMABLE_PROVIDERS = new Set(["claude", "gemini"]);
@@ -522,7 +523,10 @@ export function createTeamCalls(deps) {
     const entry = workItems(run)[itemId];
     const wt = ws.open.get(itemId) || (await openItemWorktree(ws.session, entry.key || itemKey(itemId), ws.base.branch, log));
     if (!wt) return { ok: false, reason: "worktree_missing" };
-    const result = await integrateWorktree(ws.session, wt, { title: `[${itemId}] (${run.id})`, agentFailed: false, log, into: ws.base });
+    // The work item's latest COMMIT line (its writer's own summary) names the commit.
+    const line = run.tasks.filter((x) => x.workItemId === itemId && x.status === "done").map((x) => extractCommitLine(x.resultText)).filter(Boolean).at(-1);
+    const message = line ? `${line}\n\nWork item: ${itemId} · Run: ${run.id}` : null;
+    const result = await integrateWorktree(ws.session, wt, { title: `[${itemId}] (${run.id})`, message, agentFailed: false, log, into: ws.base });
     ws.open.delete(itemId);
     entry.status = result.ok ? "integrated" : "failed";
     entry.integration = result.reason;
@@ -753,6 +757,8 @@ export function createTeamCalls(deps) {
     delegation.attempt = run.attempt || 0;
     task.workItemId = delegation.workItemId;
     task.parentWorkItemId = delegation.parentWorkItemId;
+    task.callerNodeId = callerNodeId || null;
+    task.reviewOf = reviewOf || null;
     task.question = question;
     run.tasks.push(task);
     emit({ runId, taskId: task.id, type: "task-created", task });
@@ -845,25 +851,50 @@ export function createTeamCalls(deps) {
    * `supervisor` is the coordinator's agent as the bridge session recorded it (with the team's
    * spawnPolicy and blueprints); executor.js spawnAgent looks it up.
    */
-  async function spawnBlueprint({ runId, callerNodeId, callerTaskId = null, supervisor, blueprint: name, prompt, title, workItemId, cwd, depth }) {
-    const run = runs.get(runId);
-    if (!run || run.status !== "running") throw new Error("Run không còn chạy.");
-    if (isCancelling(runId)) throw new Error("Run đang được dừng, không tạo agent mới.");
-    if (depth >= maxCallDepth) throw new Error("Đã đạt giới hạn độ sâu gọi agent (chống vòng lặp).");
-    const policy = supervisor?.spawnPolicy;
-    if (!policy?.enabled) throw new Error("Chỉ điều phối viên của một Team có bật spawn_agent mới được tạo agent.");
+  async function spawnBlueprint({ runId, supervisor, blueprint: name, ...call }) {
+    checkSpawnCall(runId, supervisor, call);
     const blueprints = supervisor.blueprints || [];
     const wanted = String(name || "").trim().toLowerCase();
     const blueprint = blueprints.find((b) => b.name === wanted);
     if (!blueprint) throw new Error(`Không có blueprint "${wanted}". Các blueprint của Team: ${blueprints.map((b) => b.name).join(", ") || "(không có)"}.`);
-    const itemId = String(workItemId || "").trim().slice(0, 80);
-    if (!itemId) throw new Error("spawn_agent với blueprint cần workItemId, để các lần sửa sau của cùng công việc nối tiếp đúng agent đó.");
+    if (!String(call.workItemId || "").trim()) throw new Error("spawn_agent với blueprint cần workItemId, để các lần sửa sau của cùng công việc nối tiếp đúng agent đó.");
+    return runSpawn({ runId, supervisor, blueprint, ...call });
+  }
+
+  /**
+   * A coordinator's `spawn_agent` call that defines the agent itself (name, role, instructions,
+   * provider/model/access), like Claude Code writing a subagent. It becomes an inline blueprint
+   * (spawn-policy.js buildInlineBlueprint) and runs exactly like a stored one, under target
+   * `spawn:<name>`: the same name and workItemId later continue the same agent.
+   */
+  async function spawnInline({ runId, supervisor, name, role, instructions, provider, model, accessLevel, tools, ...call }) {
+    checkSpawnCall(runId, supervisor, call);
+    if (!String(call.workItemId || "").trim()) throw new Error("spawn_agent tự định nghĩa agent cần workItemId, để các lần sửa sau của cùng công việc nối tiếp đúng agent đó.");
+    const taken = (supervisor.blueprints || []).map((b) => b.name);
+    const blueprint = buildInlineBlueprint(supervisor.spawnPolicy, { name, role, instructions, provider, model, accessLevel, tools }, taken);
+    return runSpawn({ runId, supervisor, blueprint, ...call });
+  }
+
+  /** What every spawn_agent call needs before anything else is looked at. */
+  function checkSpawnCall(runId, supervisor, { prompt, depth }) {
+    const run = runs.get(runId);
+    if (!run || run.status !== "running") throw new Error("Run không còn chạy.");
+    if (isCancelling(runId)) throw new Error("Run đang được dừng, không tạo agent mới.");
+    if (depth >= maxCallDepth) throw new Error("Đã đạt giới hạn độ sâu gọi agent (chống vòng lặp).");
+    if (!supervisor?.spawnPolicy?.enabled) throw new Error("Chỉ điều phối viên của một Team có bật spawn_agent mới được tạo agent.");
     if (!String(prompt || "").trim()) throw new Error("Thiếu prompt cho agent mới.");
+  }
+
+  /** Runs a stored or inline blueprint for one work item (see spawnBlueprint). */
+  async function runSpawn({ runId, callerNodeId, callerTaskId = null, supervisor, blueprint, prompt, title, workItemId, cwd, depth }) {
+    const run = runs.get(runId);
+    const policy = supervisor.spawnPolicy;
+    const itemId = String(workItemId || "").trim().slice(0, 80);
     // Built before anything is recorded: a blueprint above what may be handed out fails cleanly.
     const agents = blueprint.providers.map((entry, i) => buildBlueprintAgent(supervisor, blueprint, entry, i));
     if (!agents.length) throw new Error(`Blueprint "${blueprint.name}" chưa có provider nào.`);
 
-    const targetNode = { id: `blueprint:${blueprint.name}`, teamRole: "member", alias: blueprint.name, role: blueprint.role };
+    const targetNode = { id: `${blueprint.inline ? "spawn" : "blueprint"}:${blueprint.name}`, teamRole: "member", alias: blueprint.name, role: blueprint.role };
     const callerNode = snapshotWorkflow(run).nodes.find((n) => n.id === callerNodeId);
     const limits = callerNode?.teamLimits || null;
     const ledger = Array.isArray(run.delegations) ? run.delegations : (run.delegations = []);
@@ -886,9 +917,11 @@ export function createTeamCalls(deps) {
     if (run.activeTurnId) task.turnId = run.activeTurnId; // part of a chat turn: deleted with it
     task.spawnedByTaskId = callerTaskId || null;
     task.workItemId = itemId;
+    task.callerNodeId = callerNodeId || null;
     task.question = prompt;
     task.spawn = {
       blueprint: blueprint.name,
+      inline: !!blueprint.inline,
       role: blueprint.role,
       accessLevel: blueprint.accessLevel,
       providers: blueprint.providers.map((p) => p.provider),
@@ -917,8 +950,13 @@ export function createTeamCalls(deps) {
     emit({ runId, taskId: task.id, type: "task-created", task });
     task.status = "running";
     emit({ runId, taskId: task.id, type: "task-status", status: "running" });
-    if (callerTaskId) pushTaskLog(runId, callerTaskId, `🧬 Tạo agent từ blueprint ${blueprint.name} cho [${itemId}]: ${label}`);
-    pushTaskLog(runId, task.id, `🧬 Blueprint ${blueprint.name} (${blueprint.accessLevel}), provider theo thứ tự: ${blueprint.providers.map((p) => p.provider).join(" → ")}`);
+    if (blueprint.inline) {
+      if (callerTaskId) pushTaskLog(runId, callerTaskId, `🧬 Tạo agent ${blueprint.name} cho [${itemId}]: ${label}`);
+      pushTaskLog(runId, task.id, `🧬 Agent ${blueprint.name} (${blueprint.accessLevel}, ${agents[0].name}) do điều phối viên tự định nghĩa${blueprint.role ? `: ${blueprint.role}` : ""}`);
+    } else {
+      if (callerTaskId) pushTaskLog(runId, callerTaskId, `🧬 Tạo agent từ blueprint ${blueprint.name} cho [${itemId}]: ${label}`);
+      pushTaskLog(runId, task.id, `🧬 Blueprint ${blueprint.name} (${blueprint.accessLevel}), provider theo thứ tự: ${blueprint.providers.map((p) => p.provider).join(" → ")}`);
+    }
     pushTaskLog(runId, task.id, `❓ ${prompt}`);
 
     const usageNow = () => ({ spawned: spawnedCount(run), maxAgents: policy.maxAgents, tokensUsed: spawnedTokens(run), tokenBudget: policy.tokenBudget });
@@ -969,5 +1007,5 @@ export function createTeamCalls(deps) {
     return { ...reply, blueprint: blueprint.name, stopped, usage: usageNow() };
   }
 
-  return { askAgent, spawnBlueprint, completeWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems };
+  return { askAgent, spawnBlueprint, spawnInline, completeWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems };
 }

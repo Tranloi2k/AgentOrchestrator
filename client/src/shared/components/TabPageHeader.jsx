@@ -1,10 +1,12 @@
 import React from "react";
 import Button from "./Button.jsx";
+import { InfoTip } from "./Feedback.jsx";
 
-export default function TabPageHeader({ title, actionLabel, onAction, actionDisabled, children }) {
+// The page title lives in the app header; this bar only carries the page's actions (and an optional tip).
+export default function TabPageHeader({ hint, actionLabel, onAction, actionDisabled, children }) {
   return (
     <div className="tab-content-header">
-      <h2>{title}</h2>
+      <InfoTip>{hint}</InfoTip>
       {children}
       {actionLabel && (
         <Button variant="primary" onClick={onAction} disabled={actionDisabled}>

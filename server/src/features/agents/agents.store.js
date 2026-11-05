@@ -126,4 +126,4 @@ function removePluginFromAgents(pluginId) {
   if (touched) saveAgents();
 }
 
-export { listAgents, getAgent, createAgent, updateAgent, duplicateAgent, deleteAgent, removePluginFromAgents };
+export { listAgents, getAgent, createAgent, updateAgent, duplicateAgent, deleteAgent, removePluginFromAgents, normalizeAgentInput };

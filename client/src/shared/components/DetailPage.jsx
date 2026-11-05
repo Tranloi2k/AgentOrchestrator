@@ -19,6 +19,7 @@ export default function DetailPage({
   onCancel,
   successMessage,
   wide,
+  aside, // pinned beside the form (e.g. the AI assistant), stacked above it on narrow screens
   children,
 }) {
   const { t } = usePreferences();
@@ -43,26 +44,22 @@ export default function DetailPage({
 
   return (
     <div className="detail-page">
-      <nav className="detail-breadcrumb" aria-label="Breadcrumb">
-        {breadcrumbs.map((crumb, index) => (
-          <React.Fragment key={`${crumb.label}-${index}`}>
-            {index > 0 && <span className="detail-breadcrumb-sep">/</span>}
-            {crumb.to ? (
-              <Link to={crumb.to} className="detail-breadcrumb-link">
-                {crumb.label}
-              </Link>
-            ) : (
-              <span className="detail-breadcrumb-current">{crumb.label}</span>
-            )}
-          </React.Fragment>
-        ))}
-      </nav>
-
+      {/* Title is shown in the app header; this row keeps the breadcrumb and the save/cancel actions. */}
       <div className="detail-toolbar">
-        <div className="detail-title-block">
-          <h2 className="detail-heading">{title}</h2>
-          {subtitle && <p className="detail-subheading">{subtitle}</p>}
-        </div>
+        <nav className="detail-breadcrumb" aria-label="Breadcrumb">
+          {breadcrumbs.map((crumb, index) => (
+            <React.Fragment key={`${crumb.label}-${index}`}>
+              {index > 0 && <span className="detail-breadcrumb-sep">/</span>}
+              {crumb.to ? (
+                <Link to={crumb.to} className="detail-breadcrumb-link">
+                  {crumb.label}
+                </Link>
+              ) : (
+                <span className="detail-breadcrumb-current">{crumb.label}</span>
+              )}
+            </React.Fragment>
+          ))}
+        </nav>
         <div className="detail-actions">
           <Button variant="secondary" onClick={onCancel} disabled={saving}>
             {t("common.cancel")}
@@ -75,7 +72,14 @@ export default function DetailPage({
 
       {error && <ErrorBox className="detail-error">{error}</ErrorBox>}
 
-      <div className={`detail-layout ${wide ? "detail-layout-wide" : ""}`}>{children}</div>
+      {aside ? (
+        <div className={`detail-with-aside ${wide ? "detail-with-aside-wide" : ""}`}>
+          <div className={`detail-layout ${wide ? "detail-layout-wide" : ""}`}>{children}</div>
+          <aside className="detail-aside">{aside}</aside>
+        </div>
+      ) : (
+        <div className={`detail-layout ${wide ? "detail-layout-wide" : ""}`}>{children}</div>
+      )}
 
       {showSuccess && (
         <ConfirmModal

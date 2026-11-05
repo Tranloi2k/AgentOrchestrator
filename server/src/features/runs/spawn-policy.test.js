@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildSpawnedAgent, buildBlueprintAgent, checkSpawnLimits, spawnedTokens, normalizeSpawnPolicy, normalizeBlueprints, spawnCeiling } from "./spawn-policy.js";
+import { buildSpawnedAgent, buildBlueprintAgent, buildInlineBlueprint, checkSpawnLimits, spawnedTokens, normalizeSpawnPolicy, normalizeBlueprints, spawnCeiling } from "./spawn-policy.js";
 import { KNOWN_TOOLS } from "../../core/config.js";
 
 const policy = normalizeSpawnPolicy({
@@ -123,4 +123,25 @@ test("spawnCeiling: a Team's maxAccessLevel caps spawns; without it the supervis
   assert.equal(buildSpawnedAgent(policyW, readCoord, { provider: "claude", accessLevel: "write" }).permissionMode, "acceptEdits");
   assert.throws(() => buildSpawnedAgent({ ...policyW, maxAccessLevel: "read" }, readCoord, { provider: "claude", accessLevel: "write" }), /mà Team cho phép/);
   assert.throws(() => buildSpawnedAgent(policyW, readCoord, { provider: "claude", accessLevel: "full" }), /vượt quá quyền tối đa "write"/);
+});
+
+test("inline blueprint: the coordinator defines the agent, inside the policy's providers and models", () => {
+  const b = buildInlineBlueprint(policy, { name: "Backend Dev", role: "Builds the API", instructions: "You write Node.", provider: "claude", model: "sonnet", accessLevel: "write" });
+  assert.equal(b.name, "backend-dev");
+  assert.equal(b.inline, true);
+  assert.deepEqual(b.providers, [{ provider: "claude", model: "sonnet", instructions: "" }]);
+  assert.equal(b.tools, null);
+  assert.throws(() => buildInlineBlueprint(policy, { name: "x", provider: "other" }), /không nằm trong danh sách/);
+  assert.throws(() => buildInlineBlueprint(policy, { name: "x", provider: "claude", model: "opus" }), /không được phép/);
+  assert.throws(() => buildInlineBlueprint(policy, { name: "", provider: "claude" }), /Cần name/);
+  assert.throws(() => buildInlineBlueprint(policy, { name: "x", provider: "claude", accessLevel: "root" }), /không hợp lệ/);
+  assert.throws(() => buildInlineBlueprint(policy, { name: "painter", provider: "claude" }, ["painter"]), /tên một blueprint/);
+});
+
+test("inline blueprint: access and tools are capped like a stored blueprint's", () => {
+  const readOnly = { ...policy, maxAccessLevel: "read" };
+  const tooHigh = buildInlineBlueprint(readOnly, { name: "dev", provider: "claude", accessLevel: "write" });
+  assert.throws(() => buildBlueprintAgent({ ...supervisor, spawnPolicy: readOnly }, tooHigh, tooHigh.providers[0], 0), /vượt quá quyền tối đa/);
+  const withTask = buildInlineBlueprint(policy, { name: "dev", provider: "claude", tools: ["Read", "Task"] });
+  assert.throws(() => buildBlueprintAgent({ ...supervisor, spawnPolicy: policy }, withTask, withTask.providers[0], 0), /Task/);
 });

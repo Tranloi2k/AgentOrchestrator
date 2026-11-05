@@ -1,11 +1,11 @@
 import React from "react";
 import { DetailField } from "./DetailLayout.jsx";
 
-export function TextInput({ label, full, id, className = "", ...props }) {
+export function TextInput({ label, hint, full, id, className = "", ...props }) {
   const input = <input type="text" id={id} className={className} {...props} />;
   if (label) {
     return (
-      <DetailField label={label} full={full} htmlFor={id}>
+      <DetailField label={label} hint={hint} full={full} htmlFor={id}>
         {input}
       </DetailField>
     );
@@ -13,7 +13,7 @@ export function TextInput({ label, full, id, className = "", ...props }) {
   return input;
 }
 
-export function Select({ label, full, id, options, placeholder, children, className = "", ...props }) {
+export function Select({ label, hint, full, id, options, placeholder, children, className = "", ...props }) {
   const select = (
     <select id={id} className={className} {...props}>
       {placeholder !== undefined && <option value="">{placeholder}</option>}
@@ -29,7 +29,7 @@ export function Select({ label, full, id, options, placeholder, children, classN
 
   if (label) {
     return (
-      <DetailField label={label} full={full} htmlFor={id}>
+      <DetailField label={label} hint={hint} full={full} htmlFor={id}>
         {select}
       </DetailField>
     );
@@ -37,13 +37,13 @@ export function Select({ label, full, id, options, placeholder, children, classN
   return select;
 }
 
-export function Textarea({ label, full, id, size, className = "", ...props }) {
+export function Textarea({ label, hint, full, id, size, className = "", ...props }) {
   const classes = [size === "lg" ? "detail-textarea-lg" : "", className].filter(Boolean).join(" ");
   const textarea = <textarea id={id} className={classes || undefined} {...props} />;
 
   if (label) {
     return (
-      <DetailField label={label} full={full} htmlFor={id}>
+      <DetailField label={label} hint={hint} full={full} htmlFor={id}>
         {textarea}
       </DetailField>
     );

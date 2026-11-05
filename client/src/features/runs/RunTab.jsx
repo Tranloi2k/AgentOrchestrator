@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../../shared/api.js";
 import WorkflowCanvas from "../workflows/WorkflowCanvas.jsx";
-import TeamDiagram, { teamFromNodes, blueprintStatus } from "../workflows/team/TeamDiagram.jsx";
+import TeamDiagram, { teamFromNodes, blueprintStatus, teamFlow, teamRunOutcome } from "../workflows/team/TeamDiagram.jsx";
 import DirBrowserModal from "../../shared/components/DirBrowserModal.jsx";
 import { IconPlay, IconTrash, ProviderIcon } from "../../shared/Icons.jsx";
 import { usePreferences } from "../../app/PreferencesContext.jsx";
@@ -81,7 +81,12 @@ function SpawnMeta({ task, parentTitle }) {
   const provider = s.provider || (s.blueprint ? null : "claude");
   return (
     <div className="task-spawn-meta">
-      {s.blueprint && <span>🧬 {t("run.spawn.blueprint", { name: s.blueprint })}{task.workItemId ? ` [${task.workItemId}]` : ""} ·</span>}
+      {s.blueprint && (
+        <span title={s.inline ? s.role || "" : ""}>
+          🧬 {t(s.inline ? "run.spawn.inline" : "run.spawn.blueprint", { name: s.blueprint })}
+          {task.workItemId ? ` [${task.workItemId}]` : ""} ·
+        </span>
+      )}
       {provider ? (
         <>
           <ProviderIcon provider={provider} size={13} title={t(`agents.provider.${provider}`)} />
@@ -183,7 +188,7 @@ const TaskCard = React.memo(function TaskCard({ task, parentTitle, onDeleteTurn 
   }
 
   return (
-    <div className="task-card">
+    <div className="task-card" id={`task-${task.id}`}>
       <div className="task-head" onClick={toggleOpen}>
         <span className="task-title">
           <Badge
@@ -283,6 +288,31 @@ function TeamLimitsSummary({ usage }) {
   );
 }
 
+/** The run's prompt at the top of the page: three lines, with a toggle when it's longer than that. */
+function RunPrompt({ text }) {
+  const { t } = usePreferences();
+  const ref = useRef(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el && !expanded) setOverflows(el.scrollHeight > el.clientHeight + 1);
+  }, [text, expanded]);
+
+  return (
+    <div className="prompt-wrap">
+      <div ref={ref} className={`prompt ${expanded ? "" : "prompt-clamped"}`} title={expanded ? undefined : text}>
+        {text}
+      </div>
+      {(overflows || expanded) && (
+        <button type="button" className="prompt-toggle" onClick={() => setExpanded((v) => !v)}>
+          {expanded ? t("run.prompt.less") : t("run.prompt.more")}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /** A resumed run re-runs some nodes, so one nodeId can have several tasks across attempts.
  * The canvas should reflect the latest attempt, not the first one still sitting in history. */
 function latestTaskForNode(tasks, nodeId, kind) {
@@ -291,48 +321,6 @@ function latestTaskForNode(tasks, nodeId, kind) {
     if (task.nodeId === nodeId && (!kind || task.kind === kind)) return task;
   }
   return null;
-}
-
-const RATE_LIMIT_LABEL = { five_hour: "5h", seven_day: "7d", weekly: "7d" };
-
-/** Compact quota strip sitting right above the run's diagram/task list. Account-wide (not
- * per-run), so it's the same box regardless of which run is selected — see getUsageSummary() /
- * lastClaudeQuota in orchestrator.js for why Claude has real numbers and Codex never will. */
-function QuotaStrip({ quota }) {
-  const { t } = usePreferences();
-  const claude = quota?.claude || null;
-  const remainingPct = claude ? Math.max(0, Math.round((1 - (claude.utilization || 0)) * 100)) : null;
-
-  return (
-    <div className="run-quota-box">
-      <div className="run-quota-row">
-        <span className="run-quota-provider">
-          <ProviderIcon provider="claude" size={14} title={t("agents.provider.claude")} />
-          {t("agents.provider.claude")}
-        </span>
-        {claude ? (
-          <>
-            <div className="run-quota-bar-track">
-              <div className="run-quota-bar-fill run-quota-bar-claude" style={{ width: `${remainingPct}%` }} />
-            </div>
-            <span className="run-quota-value">
-              {t("usage.remaining")} {remainingPct}% ({RATE_LIMIT_LABEL[claude.rateLimitType] || claude.rateLimitType})
-            </span>
-            {claude.isUsingOverage && <span className="run-quota-warn">⚠️ {t("usage.overage")}</span>}
-          </>
-        ) : (
-          <span className="run-quota-value run-quota-muted">{t("usage.quotaUnknown")}</span>
-        )}
-      </div>
-      <div className="run-quota-row">
-        <span className="run-quota-provider">
-          <ProviderIcon provider="codex" size={14} title={t("agents.provider.codex")} />
-          {t("agents.provider.codex")}
-        </span>
-        <span className="run-quota-value run-quota-muted">{t("usage.quotaCodexUnavailable")}</span>
-      </div>
-    </div>
-  );
 }
 
 export default function RunTab({ view = "history" }) {
@@ -345,10 +333,6 @@ export default function RunTab({ view = "history" }) {
   const [runs, setRuns] = useState([]);
   const [selectedRunId, setSelectedRunId] = useState(null);
   const [selectedRun, setSelectedRun] = useState(null);
-  // Account-wide, not tied to selectedRun — see QuotaStrip. Loaded once up front (shows
-  // whatever was last captured from an earlier run) and refreshed as the selected run's tasks
-  // finish, since that's when a fresh Claude rate_limit_event might have landed server-side.
-  const [quota, setQuota] = useState(null);
 
   const [mode, setMode] = useState("workflow");
   const [prompt, setPrompt] = useState("");
@@ -447,7 +431,6 @@ export default function RunTab({ view = "history" }) {
       if (d.workflows.length) setWorkflowId(d.workflows[0].id);
     });
     refreshRuns();
-    loadQuota();
   }, []);
 
   useEffect(() => {
@@ -465,13 +448,6 @@ export default function RunTab({ view = "history" }) {
 
   function refreshRuns() {
     api.listRuns().then((d) => setRuns(d.runs));
-  }
-
-  function loadQuota() {
-    api
-      .getUsage()
-      .then((d) => setQuota(d.quota))
-      .catch(() => {});
   }
 
   function loadRun(id) {
@@ -541,13 +517,6 @@ export default function RunTab({ view = "history" }) {
         refreshRuns();
       }
 
-      // A task finishing is the moment a fresh Claude rate_limit_event may have landed
-      // server-side (see runClaudeProcess) — re-pull the account-wide quota then, not on every
-      // log line, so the strip in the UI stays current without hammering the endpoint.
-      if (evt.type === "task-status" && ["done", "error", "cancelled"].includes(evt.status)) {
-        loadQuota();
-      }
-
       setSelectedRun((prev) => {
         if (!prev) return prev;
 
@@ -562,7 +531,13 @@ export default function RunTab({ view = "history" }) {
             ...prev,
             tasks: prev.tasks.map((task) =>
               task.id === evt.taskId
-                ? { ...task, status: evt.status, ...(evt.usage ? { usage: evt.usage } : {}) }
+                ? {
+                    ...task,
+                    status: evt.status,
+                    ...(evt.usage ? { usage: evt.usage } : {}),
+                    ...(evt.startedAt ? { startedAt: evt.startedAt } : {}),
+                    ...(evt.endedAt ? { endedAt: evt.endedAt } : {}),
+                  }
                 : task,
             ),
           };
@@ -591,7 +566,6 @@ export default function RunTab({ view = "history" }) {
           : await api.runWorkflow({ prompt, workflowId, cwd, targetBranch: target.branch, newBranch: target.newBranch, inputs: inputValues });
       if (target.newBranch.trim()) setTarget({ branch: target.newBranch.trim(), newBranch: "" });
       setPrompt("");
-      loadQuota();
       navigate(`/run/${data.runId}`);
     } catch (err) {
       setError(err.message);
@@ -954,7 +928,7 @@ export default function RunTab({ view = "history" }) {
         {view === "history" && selectedRun && (
           <>
             <div className="run-header">
-              <div className="prompt">{selectedRun.prompt}</div>
+              <RunPrompt key={selectedRun.id} text={selectedRun.prompt} />
               <div className="meta">
                 {selectedRun.workflowId
                   ? t("run.meta.workflow")
@@ -997,7 +971,6 @@ export default function RunTab({ view = "history" }) {
               </div>
               <ErrorBox>{runActionError}</ErrorBox>
             </div>
-            <QuotaStrip quota={quota} />
             <ReviewPanel
               review={selectedRun.review}
               busy={reviewBusy}
@@ -1041,6 +1014,8 @@ export default function RunTab({ view = "history" }) {
                         statusOf={(nodeId) => latestTaskForNode(selectedRun.tasks, nodeId)?.status}
                         spawnCount={spawnedAgentCount(selectedRun.tasks)}
                         blueprintStatusOf={(name) => blueprintStatus(selectedRun.tasks, name)}
+                        flow={teamFlow(selectedRun.tasks)}
+                        outcome={teamRunOutcome(selectedRun)}
                       />
                     ) : (
                     <WorkflowCanvas

@@ -16,6 +16,7 @@ import {
 } from "../workspace/workspace.js";
 import { DEFAULT_CWD, MAX_CALL_DEPTH, PROVIDER_AVAILABILITY } from "../../core/config.js";
 import { buildSpawnedAgent, checkSpawnLimits, spawnedCount, spawnedTokens } from "./spawn-policy.js";
+import { runCommitMessage, extractCommitLine } from "./commit-message.js";
 import { pickRoute, routeInstruction, renderTemplate, resolveInputs } from "../workflows/workflow-model.js";
 import { getAgent } from "../agents/agents.store.js";
 import { getWorkflow } from "../workflows/workflows.store.js";
@@ -37,7 +38,7 @@ import { addUsage, usageTokens, runTokens } from "./run-usage.js";
 import { FAILOVER_REASONS, describeFailure } from "./delegation-policy.js";
 
 /** ask_agent: see team-calls.js. */
-const { askAgent, spawnBlueprint, completeWorkItem: completeTeamWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems } = createTeamCalls({
+const { askAgent, spawnBlueprint, spawnInline, completeWorkItem: completeTeamWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems } = createTeamCalls({
   runs,
   getAgent,
   agentForNode,
@@ -116,15 +117,20 @@ async function decomposePrompt({ runId, taskId, prompt, cwd }) {
  * supervisor's own access level and tools as the child's ceiling in buildSpawnedAgent.
  *
  * A call that names a `blueprint` goes to spawnBlueprint (team-calls.js): the team's role with
- * its own instructions, skills and provider order, continued per workItemId. Without one, the
- * ad-hoc spawn below runs exactly as before.
+ * its own instructions, skills and provider order, continued per workItemId. A call with a
+ * `name` or `workItemId` defines its agent itself and goes to spawnInline, which runs it the same
+ * way. Without either, the one-shot ad-hoc spawn below runs exactly as before.
  */
-async function spawnAgent({ sessionId, provider, model, tools, accessLevel, prompt, title, blueprint, workItemId }) {
+async function spawnAgent({ sessionId, provider, model, tools, accessLevel, prompt, title, blueprint, workItemId, name, role, instructions }) {
   const session = getBridgeSession(sessionId);
   if (!session) throw new Error("Phiên agent-bridge không hợp lệ hoặc đã kết thúc.");
   const { runId, taskId: parentTaskId, agent: supervisor, depth, cwd } = session;
   if (blueprint) {
     return spawnBlueprint({ runId, callerNodeId: session.nodeId, callerTaskId: parentTaskId, supervisor, blueprint, prompt, title, workItemId, cwd, depth });
+  }
+  if (name || workItemId) {
+    const call = { runId, callerNodeId: session.nodeId, callerTaskId: parentTaskId, supervisor, prompt, title, workItemId, cwd, depth };
+    return spawnInline({ ...call, name, role, instructions, provider, model, accessLevel, tools });
   }
   const policy = supervisor?.spawnPolicy;
   if (!policy?.enabled) throw new Error("Chỉ điều phối viên của một Team có bật spawn_agent mới được tạo agent.");
@@ -432,6 +438,12 @@ function agentForNode(node) {
   return node.spawnPolicy ? { ...agent, spawnPolicy: node.spawnPolicy, blueprints: node.blueprints || [] } : agent;
 }
 
+/** A step's commit message from its agent's COMMIT line, with where it came from; null without one. */
+function stepCommitMessage(task, origin) {
+  const line = extractCommitLine(task?.resultText);
+  return line ? `${line}\n\n${origin}` : null;
+}
+
 /** Opens the git-worktree review session for a run (see server/workspace.js), plus the
  * "Workspace" task its setup/teardown logs go into.
  *
@@ -467,6 +479,7 @@ async function openRunWorkspace(run, workflow) {
     emit({ runId: run.id, taskId: task.id, type: "task-status", status: task.status });
     return { workspace: null, fatal };
   }
+  run.reviewOpen = true; // agents that write are asked for a COMMIT line (see runAgentProcess)
   log(
     `Review an toàn đang BẬT. Agent làm việc trên nhánh ${session.reviewBranch}; ` +
     `nhánh ${session.baseBranch} chỉ thay đổi sau khi bạn bấm Accept.`
@@ -483,7 +496,7 @@ async function openRunWorkspace(run, workflow) {
  */
 async function finalizeRunReview(run, workspace, keptDirs = []) {
   try {
-    run.review = await finalizeWorkspaceReview(workspace.session, workspace.log);
+    run.review = await finalizeWorkspaceReview(workspace.session, workspace.log, (files) => runCommitMessage(run, files));
     if (run.review.status === "pending") {
       workspace.log(
         keptDirs.length
@@ -946,6 +959,7 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
       }
       const { ok } = await integrateWorktree(workspace.session, wt, {
         title: `${nodeTitle(n)} (${runId})`,
+        message: stepCommitMessage(task, `${nodeTitle(n)} · Run: ${runId}`),
         agentFailed,
         log: (line) => pushTaskLog(runId, task.id, line),
       });
@@ -1140,6 +1154,7 @@ async function executeFollowUp(run, { agent, node, workflow }, message) {
       }
       const { ok } = await integrateWorktree(workspace.session, wt, {
         title: `${nodeTitle(node)} — chat (${runId})`,
+        message: stepCommitMessage(task, `${nodeTitle(node)} · Run: ${runId}`),
         agentFailed: stopping || task.status !== "done",
         log,
       });

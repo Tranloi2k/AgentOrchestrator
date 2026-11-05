@@ -341,9 +341,11 @@ function validateTeam(team, agentExists, err, skillExists = () => true) {
   if (!team.coordinator.agentId) err("teamNoCoordinator");
   else if (!agentExists(team.coordinator.agentId)) err("unknownAgent", { node: COORDINATOR_NODE_ID });
 
-  // A team needs fixed members, or spawning on with at least one blueprint: then its coordinator
-  // creates the members the job needs itself. With neither, it has nobody to hand work to.
-  if (!team.members.length && !(team.spawnPolicy.enabled && team.blueprints.length)) err("teamEmpty");
+  // A team needs fixed members, or spawning on with providers to spawn from or at least one
+  // blueprint: then its coordinator creates the members the job needs itself (defining them on the
+  // spot, or from a blueprint). With neither, it has nobody to hand work to. Spawning on with
+  // neither providers nor blueprints is reported as spawnNoProviders below.
+  if (!team.members.length && !team.spawnPolicy.enabled) err("teamEmpty");
   const seen = new Set();
   team.members.forEach((m, i) => {
     const alias = m.alias;

@@ -10,6 +10,7 @@ import { acceptWorkspaceReview, declineWorkspaceReview } from "../workspace/work
 import { shouldRenderLogLine } from "../../core/log-utils.js";
 import { SERVER_DIR, PROVIDERS, loadJson } from "../../core/config.js";
 import { teamLimitSummary } from "./team-calls.js";
+import { ASSISTANT_RUN_PREFIX } from "../assistant/assistant-model.js";
 
 const RUNS_FILE = path.join(SERVER_DIR, "runs.json");
 
@@ -98,7 +99,21 @@ const isCancelling = (runId) => cancelling.has(runId);
 /** Set of listener callbacks(event) for broadcasting to WS clients */
 const listeners = new Set();
 
+const TERMINAL_STATUSES = ["done", "error", "cancelled", "skipped"];
+
+/** When a task started and ended, for the Run tab's flow view: stamped as its status changes. */
+function stampTask(event) {
+  const task = runs.get(event.runId)?.tasks.find((t) => t.id === event.taskId);
+  if (!task) return;
+  const now = Date.now();
+  if (event.status === "running" && !task.startedAt) task.startedAt = now;
+  if (TERMINAL_STATUSES.includes(event.status)) task.endedAt = now;
+  event.startedAt = task.startedAt || null;
+  event.endedAt = task.endedAt || null;
+}
+
 function emit(event) {
+  if (event.type === "task-status" && event.taskId) stampTask(event);
   for (const fn of listeners) {
     try {
       fn(event);
@@ -112,6 +127,8 @@ function emit(event) {
 function pushTaskLog(runId, taskId, line) {
   const normalized = String(line || "").trim();
   if (!shouldRenderLogLine(normalized)) return;
+  // The editor assistant runs outside any run; its log would only clutter the Run tab.
+  if (String(runId).startsWith(ASSISTANT_RUN_PREFIX)) return;
 
   const run = runs.get(runId);
   const task = run?.tasks.find((t) => t.id === taskId);
@@ -169,6 +186,12 @@ function summarize(run, { includeReviewPatch = false } = {}) {
       agentName: t.agentName || null,
       workItemId: t.workItemId || null,
       parentWorkItemId: t.parentWorkItemId || null,
+      // For the Run tab's flow view: who handed the work over, what it reviews, and when it ran.
+      callerNodeId: t.callerNodeId || null,
+      reviewOf: t.reviewOf || null,
+      createdAt: t.createdAt || null,
+      startedAt: t.startedAt || null,
+      endedAt: t.endedAt || null,
       failureReason: t.failureReason || null,
       spawnedByTaskId: t.spawnedByTaskId || null,
       userMessage: t.userMessage || null,
@@ -339,6 +362,7 @@ function newTask(title, kind, nodeId = null, agent = null) {
     agentId: agent?.id || null,
     agentName: agent?.name || null,
     usage: null,
+    createdAt: Date.now(),
   };
 }
 
