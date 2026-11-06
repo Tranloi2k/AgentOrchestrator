@@ -1,10 +1,10 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../../shared/api.js";
 import WorkflowCanvas from "../workflows/WorkflowCanvas.jsx";
 import TeamDiagram, { teamFromNodes, blueprintStatus, teamFlow, teamRunOutcome } from "../workflows/team/TeamDiagram.jsx";
 import DirBrowserModal from "../../shared/components/DirBrowserModal.jsx";
-import { IconPlay, IconTrash, ProviderIcon } from "../../shared/Icons.jsx";
+import { IconCheck, IconCopy, IconEdit, IconPlay, IconTrash, ProviderIcon } from "../../shared/Icons.jsx";
 import { usePreferences } from "../../app/PreferencesContext.jsx";
 import { nodeDisplay, callEdgesOf } from "../workflows/workflowDisplay.js";
 import RunChatBox from "./RunChatBox.jsx";
@@ -15,6 +15,7 @@ import {
   Button,
   CheckboxField,
   ConfirmModal,
+  ContextMenu,
   ErrorBox,
   HelperText,
   SegmentedControl,
@@ -46,14 +47,117 @@ function useWebSocket(onEvent) {
 const INITIAL_LOG_LIMIT = 400;
 const LOG_PAGE_SIZE = 400;
 
-function getLogLineClass(line) {
-  if (!line) return "log-default";
-  if (line.startsWith("❌")) return "log-error";
-  if (line.startsWith("⚠️")) return "log-warning";
-  if (line.startsWith("🔧")) return "log-tool";
-  if (line.startsWith("✅")) return "log-success";
-  if (line.startsWith("ℹ️")) return "log-info";
-  return "log-default";
+const STATUS_LINE_PREFIXES = [
+  ["❌", "error"],
+  ["⚠️", "warning"],
+  ["🔧", "tool"],
+  ["✅", "success"],
+  ["ℹ️", "info"],
+];
+
+const isDiffStart = (line) => /^(--- |\+\+\+ |@@|diff --git )/.test(line);
+const isDiffLine = (line) => /^([+\- ]|@@|diff --git |--- |\+\+\+ )/.test(line);
+
+/**
+ * Groups raw log lines into blocks so agent output reads like a document: fenced code and bare
+ * diffs become code blocks, markdown headings become headings, status lines (🔧, ℹ️, ❌…) keep
+ * their own style, and everything else is prose.
+ */
+function groupLogLines(lines) {
+  const blocks = [];
+  let code = null; // { lang, lines, fenced }
+
+  const closeCode = () => {
+    if (code) blocks.push({ type: "code", lang: code.lang, lines: code.lines });
+    code = null;
+  };
+
+  for (const raw of lines) {
+    const line = raw ?? "";
+    const fence = line.trimStart().match(/^```(\S*)/);
+    if (code?.fenced) {
+      if (fence) closeCode();
+      else code.lines.push(line);
+      continue;
+    }
+    if (fence) {
+      closeCode();
+      code = { lang: fence[1], lines: [], fenced: true };
+      continue;
+    }
+    if (code && isDiffLine(line)) {
+      code.lines.push(line);
+      continue;
+    }
+    closeCode();
+    if (isDiffStart(line)) {
+      code = { lang: "diff", lines: [line], fenced: false };
+      continue;
+    }
+
+    const status = STATUS_LINE_PREFIXES.find(([prefix]) => line.startsWith(prefix));
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    if (status) blocks.push({ type: status[1], text: line });
+    else if (heading) blocks.push({ type: "heading", text: heading[1] });
+    else if (!line.trim()) {
+      if (blocks.length && blocks[blocks.length - 1].type !== "blank") blocks.push({ type: "blank" });
+    } else blocks.push({ type: "text", text: line });
+  }
+  closeCode();
+  return blocks;
+}
+
+/** `code` and **bold** inside a prose line; everything else stays plain text. */
+function renderInline(text) {
+  return text.split(/(`[^`]+`)/g).map((part, i) => {
+    if (part.length > 2 && part.startsWith("`") && part.endsWith("`")) {
+      return (
+        <code key={i} className="log-inline-code">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return part.split(/(\*\*[^*]+\*\*)/g).map((piece, j) =>
+      piece.length > 4 && piece.startsWith("**") && piece.endsWith("**") ? (
+        <strong key={`${i}-${j}`}>{piece.slice(2, -2)}</strong>
+      ) : (
+        piece
+      ),
+    );
+  });
+}
+
+function codeLineClass(line, isDiff) {
+  if (!isDiff) return "";
+  if (/^(--- |\+\+\+ |@@|diff --git )/.test(line)) return "code-meta";
+  if (line.startsWith("+")) return "code-add";
+  if (line.startsWith("-")) return "code-del";
+  return "";
+}
+
+function LogBlock({ block }) {
+  switch (block.type) {
+    case "code": {
+      const isDiff = block.lang === "diff" || block.lines.some((l) => l.startsWith("@@"));
+      return (
+        <pre className="log-code">
+          {block.lines.map((line, i) => (
+            <span key={i} className={`log-code-line ${codeLineClass(line, isDiff)}`.trim()}>
+              {line || " "}
+            </span>
+          ))}
+        </pre>
+      );
+    }
+    case "heading":
+      return <div className="log-heading">{renderInline(block.text)}</div>;
+    case "blank":
+      return <div className="log-blank" />;
+    case "text":
+      return <div className="log-text">{renderInline(block.text)}</div>;
+    default:
+      return <div className={`log-status log-${block.type}`}>{block.text}</div>;
+  }
 }
 
 /** Same token count the server's spawn budget uses: input + output + cache writes. */
@@ -62,9 +166,9 @@ function spawnTokens(task) {
   return u ? (u.inputTokens || 0) + (u.outputTokens || 0) + (u.cacheCreationTokens || 0) : 0;
 }
 
-/** Spawned agents as the server's maxAgents counts them: a blueprint's work item once, an ad-hoc spawn per call. */
+/** Spawned agents as the server's maxAgents counts them: a named agent once per parallel copy, an ad-hoc spawn per call. */
 function spawnedAgentCount(tasks) {
-  const keys = tasks.filter((x) => x.kind === "agent-spawn").map((x) => (x.spawn?.blueprint && x.workItemId ? `${x.spawn.blueprint}|${x.workItemId}` : x.id));
+  const keys = tasks.filter((x) => x.kind === "agent-spawn").map((x) => (x.spawn?.blueprint ? `${x.spawn.blueprint}#${x.spawn.instance || 1}` : x.id));
   return new Set(keys).size;
 }
 
@@ -130,7 +234,7 @@ function FallbackLine({ task }) {
   return <div className="task-fallback">🔀 {parts.filter(Boolean).reduce((acc, part, i) => (i ? [...acc, "; ", part] : [part]), [])}</div>;
 }
 
-const TaskCard = React.memo(function TaskCard({ task, parentTitle, onDeleteTurn }) {
+const TaskCard = React.memo(function TaskCard({ task, parentTitle, onDeleteTurn, firstMessage }) {
   const { t } = usePreferences();
   const [open, setOpen] = useState(true);
   const [visibleLogCount, setVisibleLogCount] = useState(INITIAL_LOG_LIMIT);
@@ -140,6 +244,7 @@ const TaskCard = React.memo(function TaskCard({ task, parentTitle, onDeleteTurn 
   const log = task.log || [];
   const hiddenLogCount = Math.max(0, log.length - visibleLogCount);
   const visibleLog = hiddenLogCount ? log.slice(hiddenLogCount) : log;
+  const logBlocks = useMemo(() => groupLogLines(visibleLog), [visibleLog]);
   const kindKey =
     {
       planner: "kind.planner",
@@ -162,6 +267,11 @@ const TaskCard = React.memo(function TaskCard({ task, parentTitle, onDeleteTurn 
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
   }, [log.length, open, visibleLogCount]);
+
+  // What the user typed: the run prompt on the first lead task, or a chat turn's message (older
+  // turns only kept it as the title).
+  const isTurn = task.kind === "followup";
+  const chatMessage = isTurn ? task.userMessage || task.title : firstMessage || null;
 
   function toggleOpen() {
     setOpen((current) => {
@@ -188,19 +298,13 @@ const TaskCard = React.memo(function TaskCard({ task, parentTitle, onDeleteTurn 
   }
 
   return (
-    <div className="task-card" id={`task-${task.id}`}>
+    <div className={`task-card kind-${task.kind || "agent"} status-${task.status}`} id={`task-${task.id}`}>
       <div className="task-head" onClick={toggleOpen}>
-        <span className="task-title">
-          <Badge
-            variant="pending"
-            uppercase={false}
-            style={{ fontSize: 10, marginRight: 6 }}
-          >
-            {t(kindKey)}
-          </Badge>
-          {task.title}
-        </span>
+        <span className="kind-chip">{t(kindKey)}</span>
+        {/* A chat turn shows its whole message below instead of a cut-off title. */}
+        <span className="task-title">{isTurn ? "" : task.title}</span>
         <Badge variant={task.status}>{t(`status.${task.status}`)}</Badge>
+        {chatMessage && <CopyButton text={chatMessage} />}
         {onDeleteTurn && (
           <button
             type="button"
@@ -216,6 +320,11 @@ const TaskCard = React.memo(function TaskCard({ task, parentTitle, onDeleteTurn 
           </button>
         )}
       </div>
+      {chatMessage && (
+        <div className="task-message">
+          <RunPrompt text={chatMessage} />
+        </div>
+      )}
       {task.spawn && <SpawnMeta task={task} parentTitle={parentTitle} />}
       <FallbackLine task={task} />
       {open && (
@@ -229,62 +338,127 @@ const TaskCard = React.memo(function TaskCard({ task, parentTitle, onDeleteTurn 
               {t("run.log.showOlder", { count: hiddenLogCount })}
             </button>
           )}
-          {visibleLog.length
-            ? visibleLog.map((line, index) => (
-                <div
-                  key={`${task.id}-${hiddenLogCount + index}`}
-                  className={`log-line ${getLogLineClass(line)}`}
-                >
-                  {line}
-                </div>
-              ))
-            : t("run.noLog")}
+          {logBlocks.length ? (
+            logBlocks.map((block, index) => <LogBlock key={`${task.id}-${hiddenLogCount}-${index}`} block={block} />)
+          ) : (
+            <div className="log-empty">{t("run.noLog")}</div>
+          )}
         </div>
       )}
     </div>
   );
 });
 
-/** Run-level tally of spawn_agent use against the supervisor's limits (taken from the latest
- * spawned task, which records the limits it was created under). Hidden when nothing was spawned. */
-function SpawnSummary({ tasks }) {
-  const { t } = usePreferences();
-  const spawned = tasks.filter((task) => task.kind === "agent-spawn");
-  if (!spawned.length) return null;
-  const limits = spawned[spawned.length - 1].spawn?.limits || {};
-  const tokens = spawned.reduce((sum, task) => sum + spawnTokens(task), 0);
-  const running = spawned.filter((task) => task.status === "running").length;
+/** One metric tile: label, value against its limit (if any) and a thin progress bar. */
+function RunStat({ label, value, max, note, className = "" }) {
+  const hasLimit = typeof max === "number" && max > 0;
+  const ratio = hasLimit ? Math.min(1, value / max) : 0;
+  const level = !hasLimit ? "" : ratio >= 1 ? "is-full" : ratio >= 0.8 ? "is-high" : "";
   return (
-    <div className="run-spawn-summary">
-      🧬{" "}
-      {t("run.spawn.summary", {
-        count: spawnedAgentCount(tasks),
-        max: limits.maxAgents ?? "?",
-        tokens: tokens.toLocaleString(),
-        budget: limits.tokenBudget ? limits.tokenBudget.toLocaleString() : "∞",
-      })}
-      {running > 0 && <span> · {t("run.spawn.running", { count: running })}</span>}
+    <div className={["run-stat", level, className].filter(Boolean).join(" ")}>
+      <div className="run-stat-label">
+        {label}
+        {note && <span className="run-stat-note">{note}</span>}
+      </div>
+      <div className="run-stat-value">
+        {typeof value === "number" ? value.toLocaleString() : value}
+        {typeof value === "number" && <span className="run-stat-max"> / {hasLimit ? max.toLocaleString() : "∞"}</span>}
+      </div>
+      {hasLimit && (
+        <div className="run-stat-bar">
+          <div className="run-stat-bar-fill" style={{ width: `${Math.round(ratio * 100)}%` }} />
+        </div>
+      )}
     </div>
   );
 }
 
-/** A Team run's usage against its limits (server: teamLimitSummary). Hidden for other runs. */
-function TeamLimitsSummary({ usage }) {
+/**
+ * A run's usage against its limits, as columns of one card: a Team run's hand-offs and token budget
+ * (server: teamLimitSummary), and spawn_agent use against the supervisor's limits (taken from the
+ * latest spawned task, which records the limits it was created under). Hidden when neither applies.
+ */
+function RunStats({ usage, tasks }) {
   const { t } = usePreferences();
-  if (!usage) return null;
-  const full = usage.delegations >= usage.maxDelegations || (usage.runTokenBudget > 0 && usage.tokens >= usage.runTokenBudget);
+  const spawned = tasks.filter((task) => task.kind === "agent-spawn");
+  if (!usage && !spawned.length) return null;
+  // Work the coordinator handed out (members and spawned agents): what maxParallel counts.
+  const handOffs = tasks.filter((task) => task.kind === "agent-call" || task.kind === "agent-spawn");
+  const waiting = usage ? handOffs.filter((task) => task.status === "pending").length : 0;
+
+  const full = usage && (usage.delegations >= usage.maxDelegations || (usage.runTokenBudget > 0 && usage.tokens >= usage.runTokenBudget));
+  const limits = spawned.length ? spawned[spawned.length - 1].spawn?.limits || {} : {};
+  const spawnTokenTotal = spawned.reduce((sum, task) => sum + spawnTokens(task), 0);
+  const running = spawned.filter((task) => task.status === "running").length;
+
   return (
-    <div className="run-spawn-summary">
-      👥{" "}
-      {t("run.teamLimits.summary", {
-        count: usage.delegations,
-        max: usage.maxDelegations,
-        tokens: usage.tokens.toLocaleString(),
-        budget: usage.runTokenBudget ? usage.runTokenBudget.toLocaleString() : "∞",
-        minutes: usage.callTimeoutMinutes,
-      })}
-      {full && <span className="run-quota-warn"> · {t("run.teamLimits.reached")}</span>}
+    <div className="run-stats-wrap">
+      <div className="run-stats-card">
+        <div className="run-stats">
+          {usage && (
+            <>
+              <RunStat label={t("run.stats.handoffs")} value={usage.delegations} max={usage.maxDelegations} />
+              <RunStat label={t("run.stats.runTokens")} value={usage.tokens} max={usage.runTokenBudget} />
+              <RunStat label={t("run.stats.callTimeout")} value={t("run.stats.callTimeoutValue", { minutes: usage.callTimeoutMinutes })} />
+              {usage.maxParallel > 0 && (
+                <RunStat
+                  label={t("run.stats.parallel")}
+                  value={handOffs.filter((task) => task.status === "running").length}
+                  max={usage.maxParallel}
+                  note={waiting > 0 ? t("run.stats.waiting", { count: waiting }) : null}
+                />
+              )}
+            </>
+          )}
+          {spawned.length > 0 && (
+            <>
+              <RunStat
+                className={usage ? "run-stat-group-start" : ""}
+                label={t("run.stats.spawned")}
+                value={spawnedAgentCount(tasks)}
+                max={limits.maxAgents}
+                note={running > 0 ? t("run.spawn.running", { count: running }) : null}
+              />
+              <RunStat label={t("run.stats.spawnTokens")} value={spawnTokenTotal} max={limits.tokenBudget} />
+            </>
+          )}
+        </div>
+        {full && <div className="run-stats-warn">{t("run.teamLimits.reached")}</div>}
+      </div>
     </div>
+  );
+}
+
+/** Copies `text` to the clipboard; shows a check for a moment after. Doesn't toggle the card it sits in. */
+function CopyButton({ text }) {
+  const { t } = usePreferences();
+  const [copied, setCopied] = useState(false);
+
+  async function copy(e) {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Fallback for an insecure context (e.g. the app opened over LAN by IP).
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.setAttribute("readonly", "");
+      el.style.position = "absolute";
+      el.style.left = "-9999px";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  }
+
+  const label = copied ? t("common.copied") : t("common.copy");
+  return (
+    <button type="button" className={`task-copy ${copied ? "is-copied" : ""}`} title={label} aria-label={label} onClick={copy}>
+      {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+    </button>
   );
 }
 
@@ -364,6 +538,9 @@ export default function RunTab({ view = "history" }) {
     followTasksRef.current = true;
   }, [selectedRun?.id]);
   const [deleteTarget, setDeleteTarget] = useState(null); // run object pending delete, or "__all__"
+  const [runMenu, setRunMenu] = useState(null); // { run, x, y } while the right-click menu is open
+  const [renamingId, setRenamingId] = useState(null); // run whose name is being edited in the list
+  const closeRunMenu = React.useCallback(() => setRunMenu(null), []);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewDecision, setReviewDecision] = useState(null);
   const pendingLogsRef = useRef(new Map());
@@ -437,6 +614,19 @@ export default function RunTab({ view = "history" }) {
     if (view === "history" && runId) loadRun(runId);
   }, [runId, view]);
 
+  // F2 renames the open run, as in a file explorer (not while typing somewhere else).
+  useEffect(() => {
+    if (view !== "history" || !selectedRunId) return undefined;
+    function onKeyDown(e) {
+      if (e.key !== "F2" || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.target.closest?.("input, textarea, select, [contenteditable='true']")) return;
+      e.preventDefault();
+      setRenamingId(selectedRunId);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [view, selectedRunId]);
+
   useEffect(() => {
     if (view !== "new") return;
     setSelectedRunId(null);
@@ -448,6 +638,31 @@ export default function RunTab({ view = "history" }) {
 
   function refreshRuns() {
     api.listRuns().then((d) => setRuns(d.runs));
+  }
+
+  function applyRunTitle(id, title) {
+    setRuns((list) => list.map((r) => (r.id === id ? { ...r, title } : r)));
+    setSelectedRun((prev) => (prev?.id === id ? { ...prev, title } : prev));
+  }
+
+  /** Saves the name typed in the list; empty clears it so the prompt shows again. */
+  async function commitRename(run, value) {
+    setRenamingId(null);
+    const title = value.trim() || null;
+    if (title === (run.title || null) || (!run.title && title === run.prompt.trim())) return;
+    applyRunTitle(run.id, title);
+    try {
+      await api.renameRun(run.id, title || "");
+    } catch (err) {
+      applyRunTitle(run.id, run.title || null);
+      setRunActionError(err.message);
+    }
+  }
+
+  function runDeleteBlockedTooltip(run) {
+    if (run.status === "running") return t("run.deleteBlockedTooltip");
+    if (run.review?.status === "pending") return t("run.review.deleteBlocked");
+    return null;
   }
 
   function loadRun(id) {
@@ -468,6 +683,10 @@ export default function RunTab({ view = "history" }) {
         refreshRuns();
         setSelectedRunId((prev) => (prev === evt.runId ? null : prev));
         setSelectedRun((prev) => (prev?.id === evt.runId ? null : prev));
+        return;
+      }
+      if (evt.type === "run-renamed") {
+        applyRunTitle(evt.runId, evt.title || null);
         return;
       }
       if (evt.type === "runs-cleared") {
@@ -660,6 +879,9 @@ export default function RunTab({ view = "history" }) {
     ? t("run.review.deleteBlocked")
     : t("run.deleteBlockedReason");
 
+  // The task that received the run prompt: the agent of a single run, or a workflow's first step.
+  const firstLeadTaskId = selectedRun?.tasks?.find((tk) => ["agent", "workflow-node", "workflow-router"].includes(tk.kind))?.id;
+
   const currentAgent = agents.find((a) => a.id === agentId);
   const currentWorkflow = workflows.find((w) => w.id === workflowId);
 
@@ -827,7 +1049,11 @@ export default function RunTab({ view = "history" }) {
             <div
               key={r.id}
               className={`run-item ${r.id === selectedRunId ? "active" : ""}`}
-              onClick={() => navigate(`/run/${r.id}`)}
+              onClick={() => renamingId !== r.id && navigate(`/run/${r.id}`)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setRunMenu({ run: r, x: e.clientX, y: e.clientY });
+              }}
             >
               <div className="run-item-top">
                 <Badge variant={r.status} className="status">
@@ -851,14 +1077,63 @@ export default function RunTab({ view = "history" }) {
                   <IconTrash size={12} />
                 </Button>
               </div>
-              <div className="run-item-prompt">
-                {r.trigger?.type === "schedule" && <span title={t("run.trigger.schedule", { cron: r.trigger.cron })}>⏰ </span>}
-                {r.prompt.slice(0, 60)}
-              </div>
+              {renamingId === r.id ? (
+                <input
+                  className="run-item-rename"
+                  autoFocus
+                  defaultValue={r.title || r.prompt}
+                  placeholder={t("run.rename.placeholder")}
+                  maxLength={120}
+                  aria-label={t("run.rename")}
+                  onFocus={(e) => e.target.select()}
+                  onClick={(e) => e.stopPropagation()}
+                  onBlur={(e) => commitRename(r, e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                      e.preventDefault();
+                      e.currentTarget.blur();
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      // Drop the edit, then blur: commitRename sees the original value and does nothing.
+                      e.currentTarget.value = r.title || r.prompt;
+                      e.currentTarget.blur();
+                    }
+                  }}
+                />
+              ) : (
+                <div className={`run-item-prompt ${r.title ? "has-title" : ""}`.trim()} title={r.prompt}>
+                  {r.trigger?.type === "schedule" && <span title={t("run.trigger.schedule", { cron: r.trigger.cron })}>⏰ </span>}
+                  {r.title || r.prompt.slice(0, 60)}
+                </div>
+              )}
             </div>
           ))}
         </div>
       </aside>}
+
+      {runMenu && (
+        <ContextMenu
+          x={runMenu.x}
+          y={runMenu.y}
+          onClose={closeRunMenu}
+          items={[
+            {
+              label: t("run.rename"),
+              icon: <IconEdit size={14} />,
+              title: "F2",
+              onSelect: () => setRenamingId(runMenu.run.id),
+            },
+            {
+              label: t("run.menu.delete"),
+              icon: <IconTrash size={14} />,
+              danger: true,
+              disabled: !!runDeleteBlockedTooltip(runMenu.run),
+              title: runDeleteBlockedTooltip(runMenu.run) || undefined,
+              onSelect: () => setDeleteTarget(runMenu.run),
+            },
+          ]}
+        />
+      )}
 
       {deleteTarget && (
         <ConfirmModal
@@ -927,49 +1202,54 @@ export default function RunTab({ view = "history" }) {
         )}
         {view === "history" && selectedRun && (
           <>
-            <div className="run-header">
-              <RunPrompt key={selectedRun.id} text={selectedRun.prompt} />
-              <div className="meta">
-                {selectedRun.workflowId
-                  ? t("run.meta.workflow")
-                  : t("run.meta.agent", { id: selectedRun.agentId })}{" "}
-                ·{" "}
-                {selectedRun.decompose
-                  ? t("run.meta.multi")
-                  : t("run.meta.single")}{" "}
-                {selectedRun.targetBranch && (
-                  <>
-                    · <span className="run-meta-branch">⎇ {selectedRun.targetBranch}</span>{" "}
-                  </>
-                )}
-                ·{" "}
-                <Badge variant={selectedRun.status}>
-                  {t(`status.${selectedRun.status}`)}
-                </Badge>
-                {selectedRun.status === "running" && (
-                  <Button
-                    variant="secondary"
-                    color="danger"
-                    className="run-header-action run-header-stop"
-                    disabled={selectedRun.stopping}
-                    onClick={handleStop}
-                    title={t("run.stop.hint")}
-                  >
-                    {selectedRun.stopping ? t("run.stopping") : t("run.stop")}
-                  </Button>
-                )}
-                {selectedRun.resumable && (
-                  <Button
-                    variant="secondary"
-                    className="run-header-action"
-                    onClick={handleResume}
-                    title={t("run.resume.hint")}
-                  >
-                    {t("run.resume")}
-                  </Button>
-                )}
+            {/* Pinned to the top of the scroll area: which run this is, its status, and its limits. */}
+            <div className="run-pinned">
+              <div className="run-header">
+                {selectedRun.title && <h2 className="run-title">{selectedRun.title}</h2>}
+                <RunPrompt key={selectedRun.id} text={selectedRun.prompt} />
+                <div className="meta">
+                  {selectedRun.workflowId
+                    ? t("run.meta.workflow")
+                    : t("run.meta.agent", { id: selectedRun.agentId })}{" "}
+                  ·{" "}
+                  {selectedRun.decompose
+                    ? t("run.meta.multi")
+                    : t("run.meta.single")}{" "}
+                  {selectedRun.targetBranch && (
+                    <>
+                      · <span className="run-meta-branch">⎇ {selectedRun.targetBranch}</span>{" "}
+                    </>
+                  )}
+                  ·{" "}
+                  <Badge variant={selectedRun.status}>
+                    {t(`status.${selectedRun.status}`)}
+                  </Badge>
+                  {selectedRun.status === "running" && (
+                    <Button
+                      variant="secondary"
+                      color="danger"
+                      className="run-header-action run-header-stop"
+                      disabled={selectedRun.stopping}
+                      onClick={handleStop}
+                      title={t("run.stop.hint")}
+                    >
+                      {selectedRun.stopping ? t("run.stopping") : t("run.stop")}
+                    </Button>
+                  )}
+                  {selectedRun.resumable && (
+                    <Button
+                      variant="secondary"
+                      className="run-header-action"
+                      onClick={handleResume}
+                      title={t("run.resume.hint")}
+                    >
+                      {t("run.resume")}
+                    </Button>
+                  )}
+                </div>
+                <ErrorBox>{runActionError}</ErrorBox>
               </div>
-              <ErrorBox>{runActionError}</ErrorBox>
+              <RunStats usage={selectedRun.teamLimits} tasks={selectedRun.tasks} />
             </div>
             <ReviewPanel
               review={selectedRun.review}
@@ -986,9 +1266,8 @@ export default function RunTab({ view = "history" }) {
                   followTasksRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
                 }}
               >
-                <TeamLimitsSummary usage={selectedRun.teamLimits} />
-                <SpawnSummary tasks={selectedRun.tasks} />
                 {selectedRun.tasks.map((task) => (
+                  // The run prompt is the first message of the chat: shown on the first lead task.
                   <TaskCard
                     key={task.id}
                     task={task}
@@ -997,6 +1276,7 @@ export default function RunTab({ view = "history" }) {
                         ? selectedRun.tasks.find((p) => p.id === task.spawnedByTaskId)?.title?.slice(0, 60)
                         : undefined
                     }
+                    firstMessage={task.id === firstLeadTaskId ? selectedRun.prompt : undefined}
                     onDeleteTurn={
                       task.kind === "followup" && selectedRun.status !== "running" ? () => setDeleteChatTarget(task) : undefined
                     }

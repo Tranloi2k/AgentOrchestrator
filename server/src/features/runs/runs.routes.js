@@ -1,7 +1,7 @@
 import { DEFAULT_CWD } from "../../core/config.js";
 import { checkCwd } from "../../core/security.js";
 import { prepareTargetBranch } from "../workspace/workspace.js";
-import { listRuns, getRun, getUsageSummary, acceptRunReview, declineRunReview, deleteRun, clearRuns } from "./run-store.js";
+import { listRuns, getRun, getUsageSummary, acceptRunReview, declineRunReview, renameRun, deleteRun, clearRuns } from "./run-store.js";
 import { startRun, startWorkflowRun, stopRun, resumeRun, continueRun, deleteChat } from "./executor.js";
 
 /** Settles the branch a run lands on (creating a new one if asked); sends 400 and returns
@@ -48,6 +48,7 @@ export function register(app) {
 
   app.post("/api/runs/:id/review/accept", runAction((req) => acceptRunReview(req.params.id), withRun));
   app.post("/api/runs/:id/review/decline", runAction((req) => declineRunReview(req.params.id), withRun));
+  app.patch("/api/runs/:id", runAction((req) => renameRun(req.params.id, req.body?.title), withRun));
   app.delete("/api/runs/:id", runAction((req) => deleteRun(req.params.id)));
 
   app.delete("/api/runs", (req, res) => {

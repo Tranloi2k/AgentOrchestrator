@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import spawn from "cross-spawn";
 
 // This file is server/src/core/config.js. SERVER_DIR is server/ — where the data files live
-// (*.config.json, runs.json, plugins/), kept outside src/ so code moves never touch them.
+// (*.config.json, runs/, plugins/), kept outside src/ so code moves never touch them.
 const SRC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const SERVER_DIR = path.resolve(SRC_DIR, "..");
 
@@ -48,8 +48,9 @@ const SUBAGENT_SYSTEM_PROMPT = [
 // already-logged-in CLI (no API key stored by this app) — "claude" (Claude Code CLI, the
 // original/default), "codex" (OpenAI Codex CLI, `codex exec --json ...`) or "gemini" (Google's
 // Antigravity CLI `agy`, which replaced the old `gemini` command; the provider id stays
-// "gemini" so saved agents keep working).
-const PROVIDERS = ["claude", "codex", "gemini"];
+// "gemini" so saved agents keep working). "opencode" (OpenCode CLI, `opencode run`) is the one
+// exception to "no API key": it drives an OpenRouter model with a key saved on the Providers page.
+const PROVIDERS = ["claude", "codex", "gemini", "opencode"];
 
 /**
  * Where the agy binary is. Its installer adds %LOCALAPPDATA%\agy\bin to the user PATH, but a
@@ -119,16 +120,9 @@ const PROVIDER_AVAILABILITY = {
   claude: detectCliAvailable("claude"),
   codex: detectCliAvailable("codex"),
   gemini: detectCliAvailable(AGY_BIN),
+  opencode: detectCliAvailable("opencode"),
 };
 const AGY_MODELS = PROVIDER_AVAILABILITY.gemini ? loadAgyModels() : [{ value: "", label: "Mặc định (theo cấu hình agy)" }];
-
-function loadJson(file, fallback) {
-  try {
-    return JSON.parse(readFileSync(file, "utf-8"));
-  } catch {
-    return fallback;
-  }
-}
 
 export {
   DEFAULT_CWD,
@@ -143,5 +137,4 @@ export {
   AGY_BIN,
   AGY_MODELS,
   PROVIDER_AVAILABILITY,
-  loadJson,
 };

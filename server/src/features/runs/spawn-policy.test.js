@@ -145,3 +145,14 @@ test("inline blueprint: access and tools are capped like a stored blueprint's", 
   const withTask = buildInlineBlueprint(policy, { name: "dev", provider: "claude", tools: ["Read", "Task"] });
   assert.throws(() => buildBlueprintAgent({ ...supervisor, spawnPolicy: policy }, withTask, withTask.providers[0], 0), /Task/);
 });
+
+test("opencode: no model = the connection's default; a named one must be on the list", () => {
+  const withOpenCode = normalizeSpawnPolicy({ ...policy, providers: ["opencode"], opencodeModels: ["qwen/qwen3-coder:free"] });
+  assert.deepEqual(withOpenCode.opencodeModels, ["qwen/qwen3-coder:free"]);
+  assert.equal(buildSpawnedAgent(withOpenCode, supervisor, {}).model, "", "left to the connection's default model");
+  assert.equal(buildSpawnedAgent(withOpenCode, supervisor, { model: "qwen/qwen3-coder:free" }).model, "qwen/qwen3-coder:free");
+  assert.throws(() => buildSpawnedAgent(withOpenCode, supervisor, { provider: "opencode", model: "openai/gpt-5" }), /không được phép/);
+  // A team that allows opencode but lists no model can still spawn it, on the default model.
+  const noModels = { ...withOpenCode, opencodeModels: [] };
+  assert.equal(buildInlineBlueprint(noModels, { name: "dev", provider: "opencode" }).providers[0].model, "");
+});

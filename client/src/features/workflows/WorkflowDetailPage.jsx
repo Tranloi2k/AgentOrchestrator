@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../../shared/api.js";
 import WorkflowCanvas from "./WorkflowCanvas.jsx";
-import WorkflowRunSettings, { DEFAULT_TEAM_LIMITS } from "./WorkflowRunSettings.jsx";
+import { DEFAULT_TEAM_LIMITS, WorkflowLimits, WorkflowInputs, WorkflowSchedules } from "./WorkflowRunSettings.jsx";
 import TeamEditor from "./team/TeamEditor.jsx";
 import { IconClose, IconCopy } from "../../shared/Icons.jsx";
 import { usePreferences } from "../../app/PreferencesContext.jsx";
@@ -643,10 +643,13 @@ export default function WorkflowDetailPage() {
         typePicker
       ) : (
         <>
+          {/* Who does the work, how much it may use, where it works, then how and when it is started. */}
           {generalSection}
           {form.type === "team" ? teamEditor : pipelineEditor}
-          <WorkflowRunSettings form={form} setForm={setForm} workflowId={isNew ? null : id} />
+          <WorkflowLimits form={form} setForm={setForm} />
           {isolationSection}
+          <WorkflowInputs form={form} setForm={setForm} />
+          <WorkflowSchedules form={form} setForm={setForm} workflowId={isNew ? null : id} />
         </>
       )}
     </DetailPage>

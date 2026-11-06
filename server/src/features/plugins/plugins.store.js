@@ -2,12 +2,13 @@
  * Plugins: real Claude Code plugins attached to agents. CRUD plus persistence to
  * plugins.config.json; git plugins are cloned into server/plugins/<id>.
  */
-import { writeFileSync, rmSync, existsSync } from "node:fs";
+import { rmSync, existsSync } from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { nanoid } from "nanoid";
 import { removePluginFromAgents } from "../agents/agents.store.js";
-import { SERVER_DIR, loadJson } from "../../core/config.js";
+import { SERVER_DIR } from "../../core/config.js";
+import { loadJson, saveJson } from "../../core/json-file.js";
 
 const PLUGINS_FILE = path.join(SERVER_DIR, "plugins.config.json");
 const PLUGINS_DIR = path.join(SERVER_DIR, "plugins");
@@ -15,7 +16,7 @@ const PLUGINS_DIR = path.join(SERVER_DIR, "plugins");
 let PLUGINS = loadJson(PLUGINS_FILE, []);
 
 function savePlugins() {
-  writeFileSync(PLUGINS_FILE, JSON.stringify(PLUGINS, null, 2), "utf-8");
+  saveJson(PLUGINS_FILE, PLUGINS);
 }
 
 function listPlugins() {

@@ -35,12 +35,12 @@ import {
   reserveDelegation,
 } from "./delegation-policy.js";
 import { addUsage, runTokens } from "./run-usage.js";
-import { blueprintSpawnKey, buildBlueprintAgent, buildInlineBlueprint, checkSpawnLimits, spawnedCount, spawnedTokens } from "./spawn-policy.js";
+import { blueprintSpawnKey, buildBlueprintAgent, buildInlineBlueprint, checkSpawnLimits, cleanAgentName, spawnInstance, spawnedCount, spawnedTokens } from "./spawn-policy.js";
 import { openItemWorktree, integrateWorktree } from "../workspace/workspace.js";
 import { extractCommitLine } from "./commit-message.js";
 
-/** Providers whose CLI can continue an earlier session: claude --resume, agy --conversation. */
-const RESUMABLE_PROVIDERS = new Set(["claude", "gemini"]);
+/** Providers whose CLI can continue an earlier session: claude --resume, agy --conversation, opencode --session. */
+const RESUMABLE_PROVIDERS = new Set(["claude", "gemini", "opencode"]);
 /** Per part (question, answer) of the previous attempt in a transcript fallback. */
 const TRANSCRIPT_PART_MAX = 6000;
 
@@ -115,12 +115,97 @@ function transcriptPrompt(node, workItemId, transcript, question) {
   return memberPrompt(node, parts.join("\n\n"));
 }
 
+/** --------------------------- one agent, several work items --------------------------- */
+
+// A session that picks up new work items grows with each; past this many it starts over with a briefing.
+const MAX_ITEMS_PER_SESSION = 4;
+const BRIEFING_ITEMS = 4;
+const BRIEFING_ANSWER_MAX = 1200;
+const BRIEFING_MAX = 6000;
+
+/** Finished work of the same member (or named spawned agent) for the same caller, on other work items. */
+export function earlierWork(run, record) {
+  return (run.delegations || []).filter(
+    (d) =>
+      d !== record &&
+      d.callerNodeId === record.callerNodeId &&
+      d.targetNodeId === record.targetNodeId &&
+      (d.kind || "ask") === (record.kind || "ask") &&
+      d.workItemId !== record.workItemId &&
+      d.status === "done"
+  );
+}
+
+/** What an agent starting a new work item is told about the ones it already finished in this run. */
+function briefingText(run, done) {
+  const items = done.slice(-BRIEFING_ITEMS).map((d) => {
+    const answer = clip(storedAnswer(run, d), BRIEFING_ANSWER_MAX) || "(không có câu trả lời)";
+    return `### [${d.workItemId}]\n${answer}`;
+  });
+  let text = items.join("\n\n");
+  if (text.length > BRIEFING_MAX) text = `${text.slice(0, BRIEFING_MAX)}\n…(đã cắt bớt)`;
+  const older = done.length > BRIEFING_ITEMS ? ` (${done.length - BRIEFING_ITEMS} việc cũ hơn không ghi lại)` : "";
+  return `Trong run này bạn đã làm xong các việc dưới đây${older}. Dùng lại hiểu biết đó, đừng khám phá lại từ đầu những gì đã biết.\n\n${text}`;
+}
+
+/**
+ * How an agent starts a work item it hasn't touched yet, when it already finished others in the run:
+ *  - "reuse": pick its last session back up (forked) with the new task. It keeps everything it read
+ *    and learned. Needs the same agent (provider entry), a resumable provider, the same folder (Claude
+ *    keeps sessions per folder), no other running call already continuing that session, and a
+ *    session that hasn't already taken MAX_ITEMS_PER_SESSION work items.
+ *  - "briefing": a fresh session told what it already did (e.g. each work item in its own worktree).
+ * null when it has done nothing else yet.
+ */
+export function carryOverPlan(run, record, { agentId, provider, cwd }) {
+  const done = earlierWork(run, record);
+  if (!done.length) return null;
+  const last = done.at(-1);
+  const briefing = briefingText(run, done);
+  // One continuation of a session at a time: another call running on it already claimed it.
+  const claimed = (run.delegations || []).some((d) => d !== record && d.status === "running" && d.reusedSession && d.reusedSession === last.sessionId);
+  if (
+    last.sessionId &&
+    last.agentId &&
+    last.agentId === agentId &&
+    RESUMABLE_PROVIDERS.has(provider) &&
+    (last.cwd || "") === (cwd || "") &&
+    !claimed &&
+    (last.sessionItems || 1) < MAX_ITEMS_PER_SESSION
+  ) {
+    return { mode: "reuse", sessionId: last.sessionId, from: last.workItemId, sessionItems: (last.sessionItems || 1) + 1, briefing };
+  }
+  return { mode: "briefing", briefing };
+}
+
+/** The message a reused session gets: a new task, clearly not a fix to the previous one. */
+function newItemMessage(workItemId, from, question) {
+  return `--- VIỆC MỚI [${workItemId}] ---\nĐây là một công việc mới, khác với việc [${from}] bạn vừa làm xong. Giữ nguyên vai trò và cách làm như trước.\n\n${question}`;
+}
+
+/**
+ * The agents the coordinator spawned in this run, for the reply it gets after each spawn_agent:
+ * who exists, on which provider, how many work items, and whether they are busy right now.
+ */
+export function spawnRoster(run, callerNodeId) {
+  const byName = new Map();
+  for (const t of run.tasks) {
+    if (t.kind !== "agent-spawn" || !t.spawn?.blueprint || (callerNodeId && t.callerNodeId !== callerNodeId)) continue;
+    const entry = byName.get(t.spawn.blueprint) || { name: t.spawn.blueprint, inline: !!t.spawn.inline, provider: null, workItems: new Set(), busy: 0 };
+    if (t.workItemId) entry.workItems.add(t.workItemId);
+    if (t.spawn.provider) entry.provider = t.spawn.provider;
+    if (t.status === "running") entry.busy++;
+    byName.set(t.spawn.blueprint, entry);
+  }
+  return [...byName.values()].map((e) => ({ ...e, workItems: [...e.workItems] }));
+}
+
 /** --------------------------- picking a member's agent --------------------------- */
 
 /**
  * Providers this run has stopped trying: { [provider]: { reason, until, since } }, where `until`
  * is when its quota comes back (ms since the epoch) or null for the rest of the run. Kept on the
- * run so runs.json shows why a member's backup did the work.
+ * run so its saved history shows why a member's backup did the work.
  */
 function cooldowns(run) {
   if (!run.providerCooldowns || typeof run.providerCooldowns !== "object") run.providerCooldowns = {};
@@ -373,6 +458,35 @@ export function createTeamCalls(deps) {
   const minuteMs = deps.minuteMs || 60_000;
 
   /**
+   * runId -> { active, waiting: [resolve] }: the coordinator's calls running at once, held under
+   * the team's maxParallel. A call over the limit waits in line (first come, first served) rather
+   * than failing, so a coordinator that hands out ten jobs in one go just has them run a few at a
+   * time. Returns the release function; the slot passes straight to the next one waiting.
+   */
+  const parallel = new Map();
+  async function acquireSlot(runId, max, log) {
+    if (!max) return () => {};
+    let slots = parallel.get(runId);
+    if (!slots) parallel.set(runId, (slots = { active: 0, waiting: [] }));
+    if (slots.active >= max) {
+      log(`⏳ Đang có ${slots.active}/${max} agent chạy cùng lúc (giới hạn của Team): chờ tới lượt.`);
+      await new Promise((resolve) => slots.waiting.push(resolve));
+      log("▶️ Tới lượt, bắt đầu chạy.");
+    } else {
+      slots.active++;
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = slots.waiting.shift();
+      if (next) return next();
+      slots.active--;
+      if (!slots.active) parallel.delete(runId);
+    };
+  }
+
+  /**
    * Runs one agent for one call, continuing the previous attempt when there is one.
    * Returns the process result plus the session id to record for the next round.
    */
@@ -394,6 +508,7 @@ export function createTeamCalls(deps) {
     if (plan.mode === "resume") {
       log(`↩️ Tiếp tục phiên CLI của lần giao trước cho [${record.workItemId}].`);
       task.continuation = "resumed";
+      record.sessionItems = previous.sessionItems || 1; // a fix round is not a new work item
       const result = await runAgentProcess({ ...base, prompt: question, resume: plan.sessionId });
       // Out of quota, no CLI, a denied tool or a missing capability say nothing about the session:
       // retrying the same agent with a transcript would fail the same way, so that goes back to the
@@ -413,10 +528,40 @@ export function createTeamCalls(deps) {
       return { ...retry, usage: addUsage(result.usage, retry.usage) };
     }
 
-    if (plan.mode === "transcript") log(`↩️ Gửi kèm tóm tắt lần giao trước cho [${record.workItemId}] (provider không mở lại được phiên CLI).`);
-    else log(previous ? `🆕 Phiên mới cho [${record.workItemId}] (lần trước không có gì để nối tiếp).` : `🆕 Phiên mới cho [${record.workItemId}].`);
-    task.continuation = plan.mode;
-    return runAgentProcess({ ...base, prompt: fallbackPrompt, resume: null });
+    if (plan.mode === "transcript") {
+      log(`↩️ Gửi kèm tóm tắt lần giao trước cho [${record.workItemId}] (provider không mở lại được phiên CLI).`);
+      task.continuation = plan.mode;
+      return runAgentProcess({ ...base, prompt: fallbackPrompt, resume: null });
+    }
+
+    // A work item this agent hasn't touched: it may still have finished others in this run.
+    const carry = !previous && targetNode.teamRole === "member" ? carryOverPlan(run, record, { agentId: targetAgent?.id, provider, cwd }) : null;
+    const briefedPrompt = carry ? memberPrompt(targetNode, `${carry.briefing}\n\n### Việc mới [${record.workItemId}]\n${question}`) : fallbackPrompt;
+    if (carry?.mode === "reuse") {
+      log(`♻️ Dùng lại phiên của ${targetAgent?.name || "agent"} từ việc [${carry.from}] cho việc mới [${record.workItemId}] (nhớ những gì đã đọc và làm).`);
+      task.continuation = "reused";
+      record.sessionItems = carry.sessionItems;
+      record.reusedSession = carry.sessionId; // claimed: a parallel new item gets a briefing instead
+      const result = await runAgentProcess({ ...base, prompt: newItemMessage(record.workItemId, carry.from, question), resume: carry.sessionId });
+      const providerProblem = FAILOVER_REASONS.has(result.failureReason) && result.failureReason !== "no_output";
+      if (result.ok || result.resultText || isCancelling(runId) || call.timedOut || providerProblem) {
+        return { ...result, sessionId: result.sessionId || carry.sessionId };
+      }
+      log("⚠️ Không mở lại được phiên cũ, chạy phiên mới kèm tóm tắt các việc đã làm.");
+      task.continuation = "briefed";
+      record.sessionItems = 1;
+      const retry = await runAgentProcess({ ...base, prompt: briefedPrompt, resume: null });
+      return { ...retry, usage: addUsage(result.usage, retry.usage) };
+    }
+    if (carry) {
+      log(`📋 Phiên mới cho [${record.workItemId}], kèm tóm tắt ${earlierWork(run, record).length} việc agent đã làm trong run.`);
+      task.continuation = "briefed";
+    } else {
+      log(previous ? `🆕 Phiên mới cho [${record.workItemId}] (lần trước không có gì để nối tiếp).` : `🆕 Phiên mới cho [${record.workItemId}].`);
+      task.continuation = plan.mode;
+    }
+    record.sessionItems = 1;
+    return runAgentProcess({ ...base, prompt: briefedPrompt, resume: null });
   }
 
   /**
@@ -762,19 +907,23 @@ export function createTeamCalls(deps) {
     task.question = question;
     run.tasks.push(task);
     emit({ runId, taskId: task.id, type: "task-created", task });
-    task.status = "running";
-    emit({ runId, taskId: task.id, type: "task-status", status: "running" });
     pushTaskLog(runId, task.id, `❓ ${question}`);
 
     const replay = replayableDelegation(run, delegation);
     if (replay) return replayDelegation({ runId, run, task, delegation, replay, targetNode });
 
+    // Pending while it waits for a parallel slot; its time limit starts once it runs.
+    const release = await acquireSlot(runId, limits?.maxParallel, (line) => pushTaskLog(runId, task.id, line));
+    task.status = "running";
+    emit({ runId, taskId: task.id, type: "task-status", status: "running" });
     let processResult;
     try {
       processResult = await runWithFailover({ runId, task, record: delegation, run, targetNode, question, workflow, cwd, depth, reviewOf: cleanReviewOf(reviewOf), timeoutMinutes: limits?.callTimeoutMinutes || 0 });
     } catch (err) {
       pushTaskLog(runId, task.id, `❌ Lỗi nội bộ khi chạy agent: ${err.message}`);
       processResult = { ok: false, resultText: "", usage: null, failureReason: "agent_error", agent: null };
+    } finally {
+      release();
     }
     const { ok, resultText, usage, failureReason, sessionId, agent, place } = processResult;
 
@@ -871,7 +1020,23 @@ export function createTeamCalls(deps) {
     checkSpawnCall(runId, supervisor, call);
     if (!String(call.workItemId || "").trim()) throw new Error("spawn_agent tự định nghĩa agent cần workItemId, để các lần sửa sau của cùng công việc nối tiếp đúng agent đó.");
     const taken = (supervisor.blueprints || []).map((b) => b.name);
-    const blueprint = buildInlineBlueprint(supervisor.spawnPolicy, { name, role, instructions, provider, model, accessLevel, tools }, taken);
+    // A name the coordinator already defined in this run is that same agent: fields it leaves out
+    // this time come from the first definition, so handing it new work only needs name + workItemId.
+    const run = runs.get(runId);
+    const known = (run.spawnedAgents ||= {});
+    const given = Object.fromEntries(
+      Object.entries({ role, instructions, provider, model, accessLevel, tools }).filter(([, v]) => v !== undefined && v !== null && v !== "")
+    );
+    const definition = { ...(known[cleanAgentName(name)] || {}), ...given };
+    const blueprint = buildInlineBlueprint(supervisor.spawnPolicy, { name, ...definition }, taken);
+    known[blueprint.name] = {
+      role: blueprint.role,
+      instructions: blueprint.instructions,
+      provider: blueprint.providers[0].provider,
+      model: blueprint.providers[0].model,
+      accessLevel: blueprint.accessLevel,
+      ...(blueprint.tools ? { tools: blueprint.tools } : {}),
+    };
     return runSpawn({ runId, supervisor, blueprint, ...call });
   }
 
@@ -904,7 +1069,7 @@ export function createTeamCalls(deps) {
       try {
         const busy = ledger.some((d) => d.kind === "spawn" && d.callerNodeId === callerNodeId && d.targetNodeId === targetNode.id && d.workItemId === itemId && d.status === "running");
         if (busy) throw new Error(`Công việc "${itemId}" của blueprint ${blueprint.name} đang chạy; không được giao trùng.`);
-        checkSpawnLimits(run, policy, { key: blueprintSpawnKey(blueprint.name, itemId) });
+        checkSpawnLimits(run, policy, { key: blueprintSpawnKey(blueprint.name, spawnInstance(run, blueprint.name, itemId)) });
         checkTeamLimits(run, limits, { delegation: false });
       } catch (err) {
         if (callerTaskId) pushTaskLog(runId, callerTaskId, `⛔ ${err.message}`);
@@ -921,6 +1086,8 @@ export function createTeamCalls(deps) {
     task.question = prompt;
     task.spawn = {
       blueprint: blueprint.name,
+      // Which parallel copy of this agent it is; what maxAgents counts (spawnedCount).
+      instance: spawnInstance(run, blueprint.name, itemId),
       inline: !!blueprint.inline,
       role: blueprint.role,
       accessLevel: blueprint.accessLevel,
@@ -948,8 +1115,6 @@ export function createTeamCalls(deps) {
     ledger.push(record);
     run.tasks.push(task);
     emit({ runId, taskId: task.id, type: "task-created", task });
-    task.status = "running";
-    emit({ runId, taskId: task.id, type: "task-status", status: "running" });
     if (blueprint.inline) {
       if (callerTaskId) pushTaskLog(runId, callerTaskId, `🧬 Tạo agent ${blueprint.name} cho [${itemId}]: ${label}`);
       pushTaskLog(runId, task.id, `🧬 Agent ${blueprint.name} (${blueprint.accessLevel}, ${agents[0].name}) do điều phối viên tự định nghĩa${blueprint.role ? `: ${blueprint.role}` : ""}`);
@@ -959,7 +1124,13 @@ export function createTeamCalls(deps) {
     }
     pushTaskLog(runId, task.id, `❓ ${prompt}`);
 
-    const usageNow = () => ({ spawned: spawnedCount(run), maxAgents: policy.maxAgents, tokensUsed: spawnedTokens(run), tokenBudget: policy.tokenBudget });
+    const usageNow = () => ({
+      spawned: spawnedCount(run),
+      maxAgents: policy.maxAgents,
+      tokensUsed: spawnedTokens(run),
+      tokenBudget: policy.tokenBudget,
+      agents: spawnRoster(run, callerNodeId),
+    });
     if (replay) {
       const reply = replayDelegation({ runId, run, task, delegation: record, replay, targetNode });
       Object.assign(task.spawn, { provider: replay.provider || null });
@@ -968,6 +1139,10 @@ export function createTeamCalls(deps) {
 
     const { ids, sticky } = orderMemberAgents(run, record, agents.map((a) => a.id));
     const ordered = ids.map((id) => agents.find((a) => a.id === id));
+    // Pending while it waits for a parallel slot (shared with ask_agent); its time limit starts once it runs.
+    const release = await acquireSlot(runId, limits?.maxParallel, (line) => pushTaskLog(runId, task.id, line));
+    task.status = "running";
+    emit({ runId, taskId: task.id, type: "task-status", status: "running" });
     let processResult;
     try {
       processResult = await runWithFailover({
@@ -988,6 +1163,8 @@ export function createTeamCalls(deps) {
     } catch (err) {
       pushTaskLog(runId, task.id, `❌ Lỗi nội bộ khi chạy agent: ${err.message}`);
       processResult = { ok: false, resultText: "", usage: null, failureReason: "agent_error", agent: null, stopped: [] };
+    } finally {
+      release();
     }
     const { ok, resultText, usage, failureReason, sessionId, agent, place, stopped = [] } = processResult;
 
@@ -1007,5 +1184,5 @@ export function createTeamCalls(deps) {
     return { ...reply, blueprint: blueprint.name, stopped, usage: usageNow() };
   }
 
-  return { askAgent, spawnBlueprint, spawnInline, completeWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems };
+  return { askAgent, spawnBlueprint, spawnInline, completeWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems, acquireSlot };
 }

@@ -77,12 +77,53 @@ test("a fix round for the same work item resumes the member's CLI session", asyn
   assert.ok(run.tasks[1].log.some((l) => l.includes("Tiếp tục phiên CLI")));
 });
 
-test("a new work item starts fresh", async () => {
-  const { calls, ask } = setup({ dev: "claudeDev" });
+test("a new work item for the same member reuses its last session (same folder), marked as new work", async () => {
+  const { run, calls, ask } = setup({ dev: "claudeDev" });
   await ask("dev", "Build the login form", "feature");
   await ask("dev", "Build the signup form", "signup", { parentWorkItemId: "feature" });
-  assert.equal(calls[1].resume, null);
-  assert.ok(!calls[1].prompt.includes("lần giao trước"));
+  assert.equal(calls[1].resume, "claude-session-1", "it keeps what it read and learned");
+  assert.match(calls[1].prompt, /VIỆC MỚI \[signup\]/);
+  assert.match(calls[1].prompt, /khác với việc \[feature\]/);
+  assert.ok(!calls[1].prompt.includes("lần giao trước"), "not a fix round");
+  assert.equal(run.tasks[1].continuation, "reused");
+  assert.equal(run.delegations[1].sessionItems, 2);
+});
+
+test("a reused session takes at most 4 work items, then starts over with a briefing", async () => {
+  const { run, calls, ask } = setup({ dev: "claudeDev" });
+  for (const item of ["a", "b", "c", "d", "e"]) await ask("dev", `Do ${item}`, item, item === "a" ? {} : { parentWorkItemId: "a" });
+  assert.deepEqual(calls.map((c) => !!c.resume), [false, true, true, true, false]);
+  assert.equal(run.tasks[4].continuation, "briefed");
+  assert.match(calls[4].prompt, /đã làm xong các việc/);
+  assert.match(calls[4].prompt, /\[d\]\nanswer 4/, "the briefing carries earlier answers");
+  assert.match(calls[4].prompt, /role of dev/, "a fresh start still gets its role");
+  await ask("dev", "Do f", "f", { parentWorkItemId: "a" });
+  assert.equal(calls[5].resume, "claude-session-5", "the new session is reused from then on");
+});
+
+test("a new work item in another folder, or while the member is busy, gets a briefing instead of the session", async () => {
+  const { run, calls, ask } = setup({ dev: "claudeDev" });
+  await ask("dev", "Build the login form", "feature");
+  await ask("dev", "Build the signup form", "signup", { cwd: "/wt/signup", parentWorkItemId: "feature" });
+  assert.equal(calls[1].resume, null, "Claude keeps sessions per folder");
+  assert.match(calls[1].prompt, /\[feature\]\nanswer 1/);
+  assert.equal(run.tasks[1].continuation, "briefed");
+
+  // Two new items at once: only one may continue the session.
+  const there = { cwd: "/wt/signup", parentWorkItemId: "feature" }; // same folder as the last item
+  await Promise.all([ask("dev", "Build A", "a", there), ask("dev", "Build B", "b", there)]);
+  assert.equal(calls.slice(2).filter((c) => c.resume).length, 1);
+});
+
+test("a reused session that fails falls back to a briefed fresh start in the same call", async () => {
+  const broken = () => ({ ok: false, resultText: "", usage: { inputTokens: 3 }, failureReason: "agent_error" });
+  const { run, calls, ask } = setup({ dev: "claudeDev" }, [undefined, broken]);
+  const reply = await ask("dev", "Build the signup form", "signup").then(() => ask("dev", "Build the reset form", "reset", { parentWorkItemId: "signup" }));
+  assert.equal(calls[1].resume, "claude-session-1");
+  assert.equal(calls[2].resume, null);
+  assert.match(calls[2].prompt, /\[signup\]/);
+  assert.equal(reply.ok, true);
+  assert.equal(run.tasks[1].continuation, "briefed");
 });
 
 test("a failover to another member starts fresh, and so does coming back after it", async () => {
@@ -637,15 +678,55 @@ test("blueprint: a fix round with the same workItemId resumes the session on the
   assert.equal(calls.at(-1).resume, null);
 });
 
-test("blueprint: maxAgents counts distinct work items, not fix rounds or provider switches", async () => {
+test("blueprint: maxAgents counts agents, not work items, fix rounds or provider switches", async () => {
   const { spawn } = spawnSetup([fails("tool_denied")], { maxAgents: 2 });
   await spawn("painter", "Make the logo", "logo"); // two providers tried: still one agent
   await spawn("painter", "Make it blue", "logo"); // fix round
   const second = await spawn("writer", "Write the tagline", "tagline");
   assert.equal(second.usage.spawned, 2);
-  await assert.rejects(() => spawn("painter", "Make the banner", "banner"), /Đã tạo đủ 2 agent/);
-  const again = await spawn("writer", "Shorter, please", "tagline");
-  assert.equal(again.ok, true, "a known work item can still get another round at the limit");
+  const banner = await spawn("painter", "Make the banner", "banner");
+  assert.equal(banner.ok, true, "the same agent takes a new work item without a new slot");
+  assert.equal(banner.usage.spawned, 2);
+  assert.deepEqual(
+    banner.usage.agents.map((a) => [a.name, a.workItems, a.busy]),
+    [["painter", ["logo", "banner"], 0], ["writer", ["tagline"], 0]],
+    "the coordinator is told who exists"
+  );
+});
+
+test("blueprint: running the same agent on two work items at once takes a second slot", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const slow = async () => {
+    await gate;
+    return { ok: true, resultText: "logo done", usage: null, sessionId: "s-slow" };
+  };
+  const { run, spawn } = spawnSetup([slow, slow], { maxAgents: 2, blueprints: [WRITER] });
+  const first = spawn("writer", "Write the tagline", "tagline");
+  const second = spawn("writer", "Write the footer", "footer"); // tagline still running: a second copy
+  await assert.rejects(() => spawn("writer", "Write the header", "header"), /Đã tạo đủ 2 agent/, "both copies busy");
+  release();
+  assert.equal((await second).usage.spawned, 2);
+  await first;
+  const instances = run.tasks.filter((x) => x.kind === "agent-spawn").map((x) => x.spawn.instance);
+  assert.deepEqual(instances, [1, 2]);
+  const later = await spawn("writer", "Write the header", "header");
+  assert.equal(later.ok, true, "once one is free, it takes the new work in an existing slot");
+});
+
+test("inline: a name already defined in the run is that agent; new work needs only name + workItemId", async () => {
+  const { run, calls, spawnInline, supervisor } = spawnSetup([], { blueprints: [] });
+  const policy = { ...supervisor.spawnPolicy, providers: ["gemini", "claude"], claudeModels: [], geminiModels: [], opencodeModels: [], maxAccessLevel: "write" };
+  const call = (extra) =>
+    spawnInline({ runId: run.id, callerNodeId: "coordinator", supervisor: { ...supervisor, spawnPolicy: policy }, cwd: "/repo", depth: 0, ...extra });
+  await call({ name: "Backend-Dev", role: "API work", instructions: "You build APIs.", provider: "gemini", accessLevel: "write", workItemId: "users", prompt: "Add /users" });
+  const reply = await call({ name: "backend-dev", workItemId: "orders", prompt: "Add /orders" });
+  assert.equal(reply.ok, true);
+  assert.equal(calls[1].agent.provider, "gemini", "provider comes from the first definition");
+  assert.equal(calls[1].agent.accessLevel, "write");
+  assert.match(calls[1].agent.appendSystemPrompt, /You build APIs/);
+  assert.equal(calls[1].resume, "gemini-session-1", "and it continues its own session");
+  assert.equal(reply.usage.spawned, 1);
 });
 
 test("blueprint: a resumed coordinator gets a finished spawn replayed, without a process", async () => {
@@ -791,4 +872,48 @@ test("inline spawn: may not shadow a stored blueprint, and stays inside the poli
   const call = { runId: run.id, callerNodeId: "coordinator", supervisor, prompt: "Do it", workItemId: "x", cwd: "/repo", depth: 0 };
   await assert.rejects(spawnInline({ ...call, name: "painter", provider: "claude" }), /tên một blueprint/);
   await assert.rejects(spawnInline({ ...call, name: "dev", provider: "codex" }), /không nằm trong danh sách/);
+});
+
+test("maxParallel: calls over the limit wait their turn (pending) instead of failing, members and spawns together", async () => {
+  let running = 0;
+  let peak = 0;
+  const gates = [];
+  const held = () => async () => {
+    running++;
+    peak = Math.max(peak, running);
+    await new Promise((r) => gates.push(r));
+    running--;
+    return { ok: true, resultText: "done", usage: null, sessionId: null };
+  };
+  const limits = { maxDelegations: 30, callTimeoutMinutes: 30, runTokenBudget: 0, maxParallel: 2 };
+  const t = setup({ dev: "claudeDev", qa: "agyDev" }, [held(), held(), held()], { limits });
+  const supervisor = { ...AGENTS.claudeDev, accessLevel: "write", spawnPolicy: { enabled: true, providers: [], maxAgents: 5, tokenBudget: 0 }, blueprints: [WRITER] };
+
+  const a = t.ask("dev", "Build A", "a");
+  const b = t.ask("qa", "Test B", "b", { parentWorkItemId: "a" });
+  const c = t.spawnBlueprint({ runId: t.run.id, callerNodeId: "coordinator", supervisor, blueprint: "writer", prompt: "Write C", workItemId: "c", cwd: "/repo", depth: 0 });
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(t.calls.length, 2, "only two run");
+  const third = t.run.tasks.find((x) => x.kind === "agent-spawn");
+  assert.equal(third.status, "pending", "the third waits");
+  assert.ok(third.log.some((l) => l.includes("2/2 agent chạy cùng lúc")));
+
+  gates.shift()(); // one finishes: the waiting one starts
+  await a;
+  await new Promise((r) => setImmediate(r));
+  assert.equal(t.calls.length, 3);
+  assert.equal(third.status, "running");
+  gates.splice(0).forEach((g) => g());
+  await new Promise((r) => setImmediate(r));
+  gates.splice(0).forEach((g) => g());
+  const replies = await Promise.all([b, c]);
+  assert.ok(replies.every((r) => r.ok));
+  assert.equal(peak, 2, "never more than two at once");
+});
+
+test("maxParallel: a run without the limit (older snapshots) runs everything at once", async () => {
+  const t = setup({ dev: "claudeDev", qa: "agyDev" }, [], { limits: { maxDelegations: 30, callTimeoutMinutes: 30, runTokenBudget: 0 } });
+  await Promise.all([t.ask("dev", "A", "a"), t.ask("qa", "B", "b", { parentWorkItemId: "a" })]);
+  assert.equal(t.calls.length, 2);
 });

@@ -11,4 +11,5 @@ export { default as FormActions } from "./FormActions.jsx";
 export { default as SegmentedControl } from "./SegmentedControl.jsx";
 export { default as TabBar } from "./TabBar.jsx";
 export { default as TabPageHeader } from "./TabPageHeader.jsx";
+export { default as ContextMenu } from "./ContextMenu.jsx";
 export { default as AssistantPanel } from "./AssistantPanel.jsx";

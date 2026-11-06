@@ -6,6 +6,7 @@ import {
   IconSkill,
   IconWorkflow,
   IconPlugin,
+  IconKey,
   IconUsage,
   IconBook,
   IconLogo,
@@ -14,7 +15,7 @@ import {
   IconMoon,
   IconSidebar,
 } from "../shared/Icons.jsx";
-import { Button } from "../shared/components/index.js";
+import { Button, InfoTip } from "../shared/components/index.js";
 import { usePreferences } from "./PreferencesContext.jsx";
 import { usePageMeta } from "./PageMetaContext.jsx";
 
@@ -24,6 +25,7 @@ const NAV_ITEMS = [
   { path: "/skills", icon: IconSkill, labelKey: "nav.skills" },
   { path: "/plugins", icon: IconPlugin, labelKey: "nav.plugins" },
   { path: "/workflows", icon: IconWorkflow, labelKey: "nav.workflows" },
+  { path: "/providers", icon: IconKey, labelKey: "nav.providers" },
   { path: "/usage", icon: IconUsage, labelKey: "nav.usage" },
 ];
 
@@ -42,7 +44,7 @@ export default function Layout() {
   const location = useLocation();
   const navigate = useNavigate();
   const { locale, setLocale, theme, setTheme, t } = usePreferences();
-  const { meta } = usePageMeta();
+  const { meta, hint } = usePageMeta();
   const current = matchNavItem(location.pathname);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
@@ -140,7 +142,10 @@ export default function Layout() {
 
       <div className="app-main">
         <header className="page-header">
-          <h1 className="page-title">{meta?.title ?? t(current.labelKey)}</h1>
+          <div className="page-title-row">
+            <h1 className="page-title">{meta?.title ?? t(current.labelKey)}</h1>
+            <InfoTip>{hint}</InfoTip>
+          </div>
           <div className="page-header-actions">
             <Button
               variant="headerIcon"

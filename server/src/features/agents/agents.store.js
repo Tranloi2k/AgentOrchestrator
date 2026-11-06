@@ -1,13 +1,13 @@
 /**
  * Agents: CRUD plus persistence to agents.config.json. Loaded once at startup and kept in memory.
  */
-import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { nanoid } from "nanoid";
 import { normalizeAccess } from "./access.js";
 import { listWorkflows } from "../workflows/workflows.store.js";
 import { workflowAgentIds } from "../workflows/workflow-model.js";
-import { SERVER_DIR, PROVIDERS, KNOWN_TOOLS, SUBAGENT_TOOL, loadJson } from "../../core/config.js";
+import { SERVER_DIR, PROVIDERS, KNOWN_TOOLS, SUBAGENT_TOOL } from "../../core/config.js";
+import { loadJson, saveJson } from "../../core/json-file.js";
 
 const AGENTS_FILE = path.join(SERVER_DIR, "agents.config.json");
 
@@ -17,7 +17,7 @@ let AGENTS = loadJson(AGENTS_FILE, []).map((a) => ({ id: String(a.id || nanoid(8
 saveAgents();
 
 function saveAgents() {
-  writeFileSync(AGENTS_FILE, JSON.stringify(AGENTS, null, 2), "utf-8");
+  saveJson(AGENTS_FILE, AGENTS);
 }
 
 function listAgents() {
@@ -65,6 +65,8 @@ function normalizeAgentInput(input) {
     description: String(input.description || ""),
     provider,
     model: String(input.model || ""),
+    // OpenCode only: which saved OpenRouter key it runs on ("" = the default connection).
+    connectionId: provider === "opencode" ? String(input.connectionId || "") : "",
     ...normalizeAccess({ ...input, provider }),
     ...normalizeToolAccess(input),
     appendSystemPrompt: String(input.appendSystemPrompt || ""),

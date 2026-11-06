@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../../shared/api.js";
 import { usePreferences } from "../../../app/PreferencesContext.jsx";
-import { DetailField, DetailFieldGrid } from "../../../shared/components/DetailLayout.jsx";
+import { DetailField } from "../../../shared/components/DetailLayout.jsx";
 import { Select, TextInput } from "../../../shared/components/Input.jsx";
+import { HelperText } from "../../../shared/components/Feedback.jsx";
 import CheckboxField from "../../../shared/components/CheckboxField.jsx";
 import ChipSelect from "../../../shared/components/ChipSelect.jsx";
+import { useOpenRouterModels } from "../../../shared/useOpenRouterModels.js";
 
-const PROVIDERS = ["claude", "codex", "gemini"];
+const PROVIDERS = ["claude", "codex", "gemini", "opencode"];
 
 export const BLANK_SPAWN_POLICY = {
   enabled: false,
@@ -14,6 +16,7 @@ export const BLANK_SPAWN_POLICY = {
   claudeModels: [],
   codexModels: [],
   geminiModels: [],
+  opencodeModels: [],
   maxAgents: 5,
   tokenBudget: 500000,
   // The most access a spawned agent may get in this team; read unless the owner raises it.
@@ -36,6 +39,14 @@ export default function SpawnPolicyFields({ id, value, onChange, enabledLabel, h
   const set = (patch) => onChange({ ...spawn, ...patch });
   const named = (list = []) => list.filter((m) => m.value).map((m) => ({ value: m.value, label: m.label }));
   const availability = meta?.providerAvailability || {};
+  // OpenCode spawns run on the default connection, so its models are the ones offered.
+  const [modelFilter, setModelFilter] = useState("");
+  const openRouter = useOpenRouterModels("default", spawn.enabled && spawn.providers.includes("opencode"));
+  const filterText = modelFilter.trim().toLowerCase();
+  const openRouterOptions = openRouter.models
+    .filter((m) => m.tools !== false)
+    .filter((m) => !filterText || spawn.opencodeModels.includes(m.value) || `${m.value} ${m.label}`.toLowerCase().includes(filterText))
+    .map((m) => ({ value: m.value, label: m.label, title: m.value }));
 
   return (
     <>
@@ -78,6 +89,24 @@ export default function SpawnPolicyFields({ id, value, onChange, enabledLabel, h
               </DetailField>
             </>
           )}
+          {spawn.providers.includes("opencode") && (
+            <>
+              <TextInput
+                label={t("agents.model.filter")}
+                value={modelFilter}
+                placeholder={t("agents.model.filter.placeholder")}
+                onChange={(e) => setModelFilter(e.target.value)}
+              />
+              <DetailField label={t("agents.spawn.opencodeModels")} hint={t("agents.model.toolsHint")} full>
+                <ChipSelect
+                  options={openRouterOptions}
+                  selected={spawn.opencodeModels}
+                  onChange={(opencodeModels) => set({ opencodeModels })}
+                  emptyMessage={openRouter.loading ? t("agents.model.loading") : openRouter.error || t("agents.connection.none")}
+                />
+              </DetailField>
+            </>
+          )}
           <Select
             label={t("agents.spawn.maxAccessLevel")}
             value={spawn.maxAccessLevel}
@@ -85,25 +114,8 @@ export default function SpawnPolicyFields({ id, value, onChange, enabledLabel, h
             onChange={(e) => set({ maxAccessLevel: e.target.value })}
             hint={t("agents.spawn.ceilingHint")}
           />
-          <DetailFieldGrid>
-            <TextInput
-              type="number"
-              min={1}
-              max={50}
-              label={t("agents.spawn.maxAgents")}
-              hint={t("agents.spawn.limitsHint")}
-              value={spawn.maxAgents}
-              onChange={(e) => set({ maxAgents: Number(e.target.value) })}
-            />
-            <TextInput
-              type="number"
-              min={0}
-              step={10000}
-              label={t("agents.spawn.tokenBudget")}
-              value={spawn.tokenBudget}
-              onChange={(e) => set({ tokenBudget: Number(e.target.value) })}
-            />
-          </DetailFieldGrid>
+          {/* How many and how many tokens live with the run's other limits (WorkflowLimits). */}
+          <HelperText>{t("agents.spawn.limitsMoved")}</HelperText>
         </>
       )}
     </>

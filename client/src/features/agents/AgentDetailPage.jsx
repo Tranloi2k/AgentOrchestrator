@@ -15,8 +15,9 @@ import {
   AssistantPanel,
 } from "../../shared/components/index.js";
 import ToolPermissionSelect from "./ToolPermissionSelect.jsx";
+import { useOpenRouterModels, openRouterModelLabel } from "../../shared/useOpenRouterModels.js";
 
-const PROVIDERS = ["claude", "codex", "gemini"];
+const PROVIDERS = ["claude", "codex", "gemini", "opencode"];
 const ACCESS_LEVELS = ["read", "write", "full"];
 
 // Claude Code's sub-agent tool is literally named "Task" in the CLI — meaningless in a UI that
@@ -36,6 +37,7 @@ const BLANK = {
   description: "",
   provider: "claude",
   model: "",
+  connectionId: "", // OpenCode only; "" = the default connection
   accessLevel: "write",
   permissionMode: "acceptEdits",
   codexSandbox: "workspace-write",
@@ -59,6 +61,8 @@ export default function AgentDetailPage() {
   const [meta, setMeta] = useState(null);
   const [skills, setSkills] = useState([]);
   const [plugins, setPlugins] = useState([]);
+  const [connections, setConnections] = useState([]);
+  const [modelFilter, setModelFilter] = useState("");
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -71,6 +75,7 @@ export default function AgentDetailPage() {
     });
     api.listSkills().then((d) => setSkills(d.skills));
     api.listPlugins().then((d) => setPlugins(d.plugins));
+    api.listProviders().then((d) => setConnections(d.providers));
 
     if (isNew) return;
 
@@ -89,7 +94,7 @@ export default function AgentDetailPage() {
     });
   }, [id, isNew]);
 
-  const providerAvailability = meta?.providerAvailability || { claude: true, codex: true, gemini: true };
+  const providerAvailability = meta?.providerAvailability || { claude: true, codex: true, gemini: true, opencode: true };
   const levelOptions = meta?.accessOptions?.[form.accessLevel] || {};
 
   /** A new level resets the provider settings to that level's default (the last allowed value). */
@@ -101,7 +106,19 @@ export default function AgentDetailPage() {
 
   const isCodex = form.provider === "codex";
   const isGemini = form.provider === "gemini";
-  const isClaude = !isCodex && !isGemini;
+  const isOpenCode = form.provider === "opencode";
+  const isClaude = !isCodex && !isGemini && !isOpenCode;
+  const defaultConnection = connections.find((c) => c.isDefault) || connections[0];
+  const openRouter = useOpenRouterModels(form.connectionId || defaultConnection?.id, isOpenCode && connections.length > 0);
+  const filterText = modelFilter.trim().toLowerCase();
+  const openRouterOptions = openRouter.models
+    // The picked model stays listed whatever the filter says, so the select never looks empty.
+    .filter((m) => !filterText || m.value === form.model || `${m.value} ${m.label}`.toLowerCase().includes(filterText))
+    .map((m) => ({ value: m.value, label: openRouterModelLabel(m, t), title: m.value }));
+  // A model saved earlier that the connection no longer lists (e.g. switched to a free key).
+  if (form.model && isOpenCode && !openRouter.loading && !openRouter.models.some((m) => m.value === form.model)) {
+    openRouterOptions.unshift({ value: form.model, label: form.model });
+  }
   const providerOptions = PROVIDERS.map((p) => ({
     value: p,
     label: providerAvailability[p] ? t(`agents.provider.${p}`) : t("agents.provider.notFound", { name: t(`agents.provider.${p}`) }),
@@ -157,7 +174,9 @@ export default function AgentDetailPage() {
     );
   }
 
-  const advanced = isCodex ? (
+  const advanced = isOpenCode ? (
+    <HelperText>{t("agents.opencodeAdvanced")}</HelperText>
+  ) : isCodex ? (
     <>
       <Select
         label={t("agents.codexSandbox")}
@@ -225,9 +244,54 @@ export default function AgentDetailPage() {
         {!providerAvailability[form.provider] && (
           <ErrorBox>{t("agents.provider.unavailableWarning", { name: t(`agents.provider.${form.provider}`) })}</ErrorBox>
         )}
-        <DetailFieldGrid>
-          <Select label={t("agents.model")} value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} options={modelOptions} />
-        </DetailFieldGrid>
+        {isOpenCode ? (
+          <>
+            {connections.length ? (
+              <DetailFieldGrid>
+                <Select
+                  label={t("agents.connection")}
+                  hint={t("agents.connection.hint")}
+                  value={form.connectionId}
+                  onChange={(e) => setForm({ ...form, connectionId: e.target.value })}
+                  options={[
+                    { value: "", label: t("agents.connection.default", { name: defaultConnection?.name || "" }) },
+                    ...connections.map((c) => ({ value: c.id, label: `${c.name} · ${t(`providers.tier.${c.tier}`)}` })),
+                  ]}
+                />
+                <TextInput
+                  label={t("agents.model.filter")}
+                  value={modelFilter}
+                  placeholder={t("agents.model.filter.placeholder")}
+                  onChange={(e) => setModelFilter(e.target.value)}
+                />
+              </DetailFieldGrid>
+            ) : (
+              <ErrorBox>{t("agents.connection.none")}</ErrorBox>
+            )}
+            {connections.length > 0 && (
+              <Select
+                label={t("agents.model")}
+                full
+                value={form.model}
+                onChange={(e) => setForm({ ...form, model: e.target.value })}
+                placeholder={
+                  openRouter.loading
+                    ? t("agents.model.loading")
+                    : t("agents.model.connectionDefault", {
+                        model: (connections.find((c) => c.id === form.connectionId) || defaultConnection)?.defaultModel || "openrouter/free",
+                      })
+                }
+                options={openRouterOptions}
+              />
+            )}
+            <ErrorBox>{openRouter.error}</ErrorBox>
+            <HelperText>{t("agents.model.toolsHint")}</HelperText>
+          </>
+        ) : (
+          <DetailFieldGrid>
+            <Select label={t("agents.model")} value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} options={modelOptions} />
+          </DetailFieldGrid>
+        )}
         <TextInput
           label={t("agents.description")}
           full
@@ -282,7 +346,7 @@ export default function AgentDetailPage() {
           />
         </DetailField>
         {!isClaude ? (
-          <HelperText>{t(isGemini ? "agents.geminiSkillsHint" : "agents.codexSkillsHint")}</HelperText>
+          <HelperText>{t(isOpenCode ? "agents.opencodeSkillsHint" : isGemini ? "agents.geminiSkillsHint" : "agents.codexSkillsHint")}</HelperText>
         ) : (
           <DetailField label={t("agents.plugins")} full>
             <ChipSelect

@@ -2,13 +2,13 @@
  * Workflows: CRUD plus persistence to workflows.config.json, with save-time validation (see
  * workflow-model.js). Loaded once at startup and kept in memory.
  */
-import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { nanoid } from "nanoid";
 import { normalizeWorkflowInput, validateWorkflow } from "./workflow-model.js";
 import { listAgents } from "../agents/agents.store.js";
 import { listSkills } from "../skills/skills.store.js";
-import { SERVER_DIR, loadJson } from "../../core/config.js";
+import { SERVER_DIR } from "../../core/config.js";
+import { loadJson, saveJson } from "../../core/json-file.js";
 
 const WORKFLOWS_FILE = path.join(SERVER_DIR, "workflows.config.json");
 
@@ -21,7 +21,7 @@ let WORKFLOWS = loadJson(WORKFLOWS_FILE, []).map((w) => ({
 saveWorkflows();
 
 function saveWorkflows() {
-  writeFileSync(WORKFLOWS_FILE, JSON.stringify(WORKFLOWS, null, 2), "utf-8");
+  saveJson(WORKFLOWS_FILE, WORKFLOWS);
 }
 
 function listWorkflows() {

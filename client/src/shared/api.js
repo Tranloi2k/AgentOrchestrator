@@ -57,6 +57,18 @@ export const api = {
     ),
   deleteWorkflow: (id) => fetch(`/api/workflows/${id}`, { method: "DELETE" }).then(json),
 
+  listProviders: () => fetch("/api/providers").then(json),
+  createProvider: (data) =>
+    fetch("/api/providers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json),
+  updateProvider: (id, data) =>
+    fetch(`/api/providers/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(
+      json
+    ),
+  deleteProvider: (id) => fetch(`/api/providers/${id}`, { method: "DELETE" }).then(json),
+  testProvider: (id) => fetch(`/api/providers/${id}/test`, { method: "POST" }).then(json),
+  // id "default" = the default connection.
+  providerModels: (id) => fetch(`/api/providers/${encodeURIComponent(id || "default")}/models`).then(json),
+
   askAssistant: (data) =>
     fetch("/api/assistant", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json),
 
@@ -64,6 +76,8 @@ export const api = {
 
   listRuns: () => fetch("/api/runs").then(json),
   getRun: (id) => fetch(`/api/runs/${id}`).then(json),
+  renameRun: (id, title) =>
+    fetch(`/api/runs/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) }).then(json),
   deleteRun: (id) => fetch(`/api/runs/${id}`, { method: "DELETE" }).then(json),
   clearRuns: () => fetch("/api/runs", { method: "DELETE" }).then(json),
   stopRun: (id) => fetch(`/api/runs/${id}/stop`, { method: "POST" }).then(json),

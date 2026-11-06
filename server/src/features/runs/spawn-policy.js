@@ -49,17 +49,42 @@ export const spawnedTokens = (run) =>
     .filter((t) => t.kind === "agent-spawn")
     .reduce((sum, t) => sum + (t.usage?.inputTokens || 0) + (t.usage?.outputTokens || 0) + (t.usage?.cacheCreationTokens || 0), 0);
 
-/** What one spawned agent counts as against maxAgents: its blueprint work item, or the task itself. */
-const spawnKey = (t) => (t.spawn?.blueprint && t.workItemId ? `${t.spawn.blueprint}|${t.workItemId}` : t.id ?? t);
+/** The key copy `instance` of a named agent (stored or inline blueprint) counts under (see spawnedCount). */
+export const blueprintSpawnKey = (blueprint, instance = 1) => `${blueprint}#${instance}`;
+
+/** What one spawned agent counts as against maxAgents: a named agent per parallel copy, or the task itself. */
+const spawnKey = (t) => (t.spawn?.blueprint ? blueprintSpawnKey(t.spawn.blueprint, t.spawn.instance || 1) : t.id ?? t);
 
 /**
- * Spawned agents so far, as maxAgents counts them: a blueprint's work item counts once however many
- * fix rounds, provider switches or replays it has; an ad-hoc spawn counts once per call.
+ * Spawned agents so far, as maxAgents counts them. A named agent is one agent however many work
+ * items, fix rounds, provider switches or replays it goes through; only running two of its work
+ * items at the same time takes a second copy (and a second slot). An ad-hoc spawn counts once per call.
  */
 export const spawnedCount = (run) => new Set(run.tasks.filter((t) => t.kind === "agent-spawn").map(spawnKey)).size;
 
-/** The key a blueprint spawn of `workItemId` counts under (see spawnedCount). */
-export const blueprintSpawnKey = (blueprint, workItemId) => `${blueprint}|${workItemId}`;
+/**
+ * Which copy of agent `name` a call for `workItemId` runs as: the one that last worked on that
+ * item when it is free, else the lowest copy not busy right now. Sequential work stays on copy 1.
+ */
+export function spawnInstance(run, name, workItemId) {
+  const own = run.tasks.filter((t) => t.kind === "agent-spawn" && t.spawn?.blueprint === name);
+  // A copy waiting for a parallel slot (pending) is as taken as one running.
+  const busy = new Set(own.filter((t) => t.status === "running" || t.status === "pending").map((t) => t.spawn.instance || 1));
+  const previous = own.filter((t) => t.workItemId === workItemId).at(-1)?.spawn?.instance;
+  if (previous && !busy.has(previous)) return previous;
+  let n = 1;
+  while (busy.has(n)) n++;
+  return n;
+}
+
+/** An agent name as spawn_agent stores it: lowercase, digits, - and _, at most 40 characters. */
+export const cleanAgentName = (name) =>
+  String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^[-_]+/, "")
+    .slice(0, 40);
 
 /** The provider/model a spawn asks for, checked against the policy's lists; throws when not allowed. */
 function allowedProviderModel(policy, provider, model) {
@@ -70,7 +95,8 @@ function allowedProviderModel(policy, provider, model) {
   if (!policy.providers.includes(provider)) throw new Error(`Provider "${provider}" không nằm trong danh sách cho phép: ${policy.providers.join(", ") || "(trống)"}.`);
 
   model = String(model || "");
-  const allowedModels = { codex: policy.codexModels, gemini: policy.geminiModels }[provider] || policy.claudeModels;
+  // Left empty, opencode runs on its connection's default model (runOpenCodeProcess), like a CLI default.
+  const allowedModels = { codex: policy.codexModels, gemini: policy.geminiModels, opencode: policy.opencodeModels || [] }[provider] || policy.claudeModels;
   if (model && !allowedModels.includes(model)) {
     throw new Error(`Model "${model}" không được phép cho ${provider}. Được phép: mặc định của CLI${allowedModels.length ? ", " + allowedModels.join(", ") : ""}.`);
   }
@@ -200,12 +226,7 @@ export function buildInlineBlueprint(policy, { name, role, instructions, provide
   const chosen = allowedProviderModel(policy, provider, model);
   const level = accessLevel || "read";
   if (!ACCESS_LEVELS.includes(level)) throw new Error(`accessLevel "${level}" không hợp lệ. Dùng: ${ACCESS_LEVELS.join(", ")}.`);
-  const cleanName = String(name || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/^[-_]+/, "")
-    .slice(0, 40);
+  const cleanName = cleanAgentName(name);
   if (!isBlueprintName(cleanName)) throw new Error('Cần name cho agent mới (chữ thường, số, - hoặc _, tối đa 40 ký tự), ví dụ "backend-dev".');
   if (taken.includes(cleanName)) throw new Error(`"${cleanName}" là tên một blueprint của Team: truyền blueprint="${cleanName}" để dùng nó, hoặc đặt tên khác.`);
   return {
@@ -256,6 +277,7 @@ export function normalizeSpawnPolicy(input) {
     claudeModels: strings(input?.claudeModels),
     codexModels: strings(input?.codexModels),
     geminiModels: strings(input?.geminiModels),
+    opencodeModels: strings(input?.opencodeModels),
     maxAgents: int(input?.maxAgents, 5, 1, 50),
     tokenBudget: int(input?.tokenBudget, 500000, 0, 100_000_000),
     // The most access a spawned agent may get in this Team (see spawnCeiling); read unless the

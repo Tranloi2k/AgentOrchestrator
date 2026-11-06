@@ -46,7 +46,8 @@ function contextFor(target) {
   const models = { claude: MODELS, codex: CODEX_MODELS, gemini: AGY_MODELS };
   return {
     providers: available,
-    models: Object.fromEntries(available.map((p) => [p, models[p]])),
+    // OpenCode's models are OpenRouter's catalogue, fetched per connection: none to offer here.
+    models: Object.fromEntries(available.map((p) => [p, models[p] || []])),
     accessLevels: ACCESS_LEVELS,
     tools: KNOWN_TOOLS,
     skills,

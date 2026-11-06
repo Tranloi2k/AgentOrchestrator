@@ -23,7 +23,7 @@
   --color-secondary: #3f3f46;
   --color-secondary-hover: #27272a;
   --color-tertiary: #f1f1f4;
-  --color-neutral: #f7f7f9;
+  --color-neutral: #f3f3f6;
   --color-surface: #ffffff;
   /* Always dark: log, diff and terminal panes */
   --color-surface-strong: #0e0e13;
@@ -79,8 +79,13 @@
   --sidebar-collapsed-width: 56px;
 
   /* Shadows — crisp tech elevation */
-  --shadow-sm: 0 1px 2px 0 rgba(17, 17, 24, 0.05);
-  --shadow-md: 0 6px 18px -6px rgba(17, 17, 24, 0.12), 0 2px 4px -2px rgba(17, 17, 24, 0.05);
+  --shadow-xs: 0 1px 2px rgba(17, 17, 24, 0.05);
+  --shadow-sm: 0 1px 2px rgba(17, 17, 24, 0.06), 0 1px 3px rgba(17, 17, 24, 0.05);
+  --shadow-md: 0 4px 12px -2px rgba(17, 17, 24, 0.08), 0 2px 4px -2px rgba(17, 17, 24, 0.05);
+  --shadow-lg: 0 16px 40px -12px rgba(17, 17, 24, 0.22), 0 4px 10px -4px rgba(17, 17, 24, 0.08);
+  /* Right edge of a full-height region (sidebar, list column) */
+  --shadow-region: 1px 0 0 var(--color-border), 4px 0 16px -8px rgba(17, 17, 24, 0.1);
+  --shadow-header: 0 1px 0 var(--color-border), 0 1px 3px rgba(17, 17, 24, 0.04);
   --shadow-glow: 0 0 0 3px rgba(79, 70, 229, 0.15);
 
   /* Status */
@@ -123,12 +128,14 @@ body {
 .sidebar-nav {
   flex: 0 0 var(--sidebar-width);
   background: var(--sidebar-bg);
-  border-right: 1px solid var(--sidebar-border);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
   overflow-x: hidden;
   transition: flex-basis 0.2s ease;
+  position: relative;
+  z-index: 2;
+  box-shadow: var(--shadow-region);
 }
 
 /* Collapsed: an icon-only rail; labels and brand text are hidden. */
@@ -304,8 +311,10 @@ body {
   gap: var(--space-xs);
   padding: 8px var(--space-md);
   background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border);
   min-height: 48px;
+  position: relative;
+  z-index: 1;
+  box-shadow: var(--shadow-header);
 }
 
 .page-header-actions {
@@ -358,6 +367,24 @@ body {
 
 .header-icon-btn.theme-btn.is-dark:hover {
   color: var(--color-primary-hover);
+}
+
+.page-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Header tip sits right after the title at the left edge: open the bubble down and to the right. */
+.page-title-row .info-tip-bubble {
+  left: -6px;
+  transform: translateY(-2px);
+}
+
+.page-title-row .info-tip:hover .info-tip-bubble,
+.page-title-row .info-tip:focus-visible .info-tip-bubble {
+  transform: translateY(0);
 }
 
 .page-title {
@@ -518,7 +545,7 @@ body {
   text-transform: none;
   white-space: normal;
   text-align: left;
-  box-shadow: 0 8px 24px -6px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-lg);
   opacity: 0;
   visibility: hidden;
   transform: translate(-50%, -2px);
@@ -567,7 +594,7 @@ body {
 
 /* Narrow side panels and right-aligned bars: open the bubble towards the left so it isn't clipped. */
 .tab-content-header .info-tip-bubble,
-.detail-aside .info-tip-bubble,
+.detail-dock .info-tip-bubble,
 .detail-field-grid > .detail-field:last-child .info-tip-bubble {
   left: auto;
   right: -6px;
@@ -576,8 +603,8 @@ body {
 
 .tab-content-header .info-tip:hover .info-tip-bubble,
 .tab-content-header .info-tip:focus-visible .info-tip-bubble,
-.detail-aside .info-tip:hover .info-tip-bubble,
-.detail-aside .info-tip:focus-visible .info-tip-bubble,
+.detail-dock .info-tip:hover .info-tip-bubble,
+.detail-dock .info-tip:focus-visible .info-tip-bubble,
 .detail-field-grid > .detail-field:last-child .info-tip:hover .info-tip-bubble,
 .detail-field-grid > .detail-field:last-child .info-tip:focus-visible .info-tip-bubble {
   transform: translateY(0);
@@ -702,10 +729,12 @@ body {
 }
 
 .sidebar {
-  border-right: 1px solid var(--color-border);
   padding: 20px;
   overflow-y: auto;
   background: var(--color-surface);
+  position: relative;
+  z-index: 1;
+  box-shadow: var(--shadow-region);
 }
 
 .run-config-header {
@@ -964,7 +993,7 @@ button.secondary-btn {
   font-weight: 500;
   line-height: 20px;
   font-family: inherit;
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-xs);
   transition:
     background 0.15s ease,
     border-color 0.15s ease,
@@ -1085,8 +1114,10 @@ button.secondary-btn.danger:disabled {
   min-width: 0;
   padding: 20px 12px;
   overflow-y: auto;
-  background: var(--color-neutral);
-  border-right: 1px solid var(--color-border);
+  background: var(--color-surface);
+  position: relative;
+  z-index: 1;
+  box-shadow: var(--shadow-region);
 }
 
 .run-list {
@@ -1161,12 +1192,14 @@ button.new-run-btn {
 .run-item:hover {
   background: var(--color-surface);
   border-color: var(--color-on-surface-muted);
+  box-shadow: var(--shadow-md);
 }
 
 .run-item.active {
   background: rgba(var(--color-primary-rgb), 0.08);
   border-color: rgba(var(--color-primary-rgb), 0.4);
   color: var(--color-on-surface);
+  box-shadow: var(--shadow-md);
 }
 
 .run-item-top {
@@ -1201,6 +1234,97 @@ button.new-run-btn {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A run the user named: the name reads as a title, not as a clipped prompt. */
+.run-item-prompt.has-title {
+  font-weight: 600;
+}
+
+.run-item-rename {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-on-surface);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.15);
+}
+
+/* ---------- Context menu (right click) ---------- */
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
+  animation: context-menu-in 0.08s ease-out;
+}
+
+@keyframes context-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-on-surface);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-menu-item:hover,
+.context-menu-item:focus-visible {
+  background: var(--color-tertiary);
+  outline: none;
+}
+
+.context-menu-item.is-danger {
+  color: var(--status-error-text);
+}
+
+.context-menu-item.is-danger:hover,
+.context-menu-item.is-danger:focus-visible {
+  background: var(--status-error-bg);
+}
+
+.context-menu-item[aria-disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.context-menu-item[aria-disabled]:hover {
+  background: transparent;
+}
+
+.context-menu-icon {
+  display: inline-flex;
+  color: var(--color-on-surface-muted);
+}
+
+.context-menu-item.is-danger .context-menu-icon {
+  color: inherit;
 }
 
 /* ---------- Main content ---------- */
@@ -1248,10 +1372,40 @@ button.new-run-btn {
   justify-content: center;
 }
 
+/* Run title, prompt, status and limits stay at the top of the scroll area while reading tasks.
+   Negative margins cover .main's padding so nothing scrolls visibly above or beside it. */
+.run-pinned {
+  position: sticky;
+  top: calc(-1 * var(--space-md));
+  z-index: 3;
+  margin: calc(-1 * var(--space-md)) calc(-1 * var(--space-lg)) 12px;
+  padding: var(--space-md) var(--space-lg) 12px;
+  background: var(--color-neutral);
+  box-shadow: 0 1px 0 var(--color-border), 0 6px 12px -10px rgba(17, 17, 24, 0.18);
+}
+
+[data-theme="dark"] .run-pinned {
+  box-shadow: 0 1px 0 var(--color-border), 0 6px 12px -10px rgba(0, 0, 0, 0.7);
+}
+
 .run-header {
-  margin-bottom: var(--space-md);
-  padding-bottom: var(--space-sm);
-  border-bottom: 1px solid var(--color-border);
+  margin: 0;
+}
+
+.run-title {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 26px;
+  color: var(--color-on-surface);
+  overflow-wrap: anywhere;
+}
+
+/* Under a user-given title the prompt steps back to secondary text. */
+.run-title + .prompt-wrap .prompt {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--color-on-surface-muted);
 }
 
 .run-header .prompt {
@@ -1316,10 +1470,11 @@ button.new-run-btn {
 /* ---------- Run change review ---------- */
 .run-review,
 .run-review-empty {
-  margin-bottom: var(--space-md);
+  margin-bottom: 12px;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
 
@@ -1527,99 +1682,275 @@ button.new-run-btn {
 
 /* ---------- Task cards ---------- */
 .task-card {
+  --kind-bg: rgba(var(--color-primary-rgb), 0.1);
+  --kind-text: var(--color-primary);
+  position: relative;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  margin-bottom: var(--space-xs);
+  border-radius: var(--radius-md);
+  margin-bottom: 12px;
   overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
+
+/* Status lives in the header badge; the card outline only hints at the two states worth spotting while scrolling. */
+.task-card.status-error {
+  border-color: rgba(var(--color-error-rgb), 0.45);
+}
+
+.task-card.status-running {
+  border-color: rgba(6, 182, 212, 0.45);
+}
+
+/* Kind chip colour per task kind. */
+.task-card.kind-workspace {
+  --kind-bg: rgba(245, 158, 11, 0.14);
+  --kind-text: #b45309;
+}
+.task-card.kind-workflow-router {
+  --kind-bg: rgba(139, 92, 246, 0.14);
+  --kind-text: #6d28d9;
+}
+.task-card.kind-planner {
+  --kind-bg: rgba(14, 165, 233, 0.14);
+  --kind-text: #0369a1;
+}
+.task-card.kind-agent-call {
+  --kind-bg: rgba(20, 184, 166, 0.14);
+  --kind-text: #0f766e;
+}
+.task-card.kind-agent-spawn {
+  --kind-bg: rgba(217, 70, 239, 0.13);
+  --kind-text: #a21caf;
+}
+.task-card.kind-followup {
+  --kind-bg: rgba(59, 130, 246, 0.13);
+  --kind-text: #1d4ed8;
+}
+.task-card.kind-resume {
+  --kind-bg: rgba(100, 116, 139, 0.14);
+  --kind-text: #475569;
+}
+
+[data-theme="dark"] .task-card.kind-workspace {
+  --kind-text: #fbbf24;
+}
+[data-theme="dark"] .task-card.kind-workflow-router {
+  --kind-text: #c4b5fd;
+}
+[data-theme="dark"] .task-card.kind-planner {
+  --kind-text: #7dd3fc;
+}
+[data-theme="dark"] .task-card.kind-agent-call {
+  --kind-text: #5eead4;
+}
+[data-theme="dark"] .task-card.kind-agent-spawn {
+  --kind-text: #f0abfc;
+}
+[data-theme="dark"] .task-card.kind-followup {
+  --kind-text: #93c5fd;
+}
+[data-theme="dark"] .task-card.kind-resume {
+  --kind-text: #cbd5e1;
 }
 
 .task-card .task-head {
-  padding: var(--space-xs) var(--space-sm);
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 10px var(--space-sm);
   cursor: pointer;
-  background: var(--color-neutral);
+  background: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
   transition: background 0.1s;
 }
 
 .task-card .task-head:hover {
-  background: var(--color-tertiary);
+  background: var(--color-neutral);
+}
+
+.task-card .kind-chip {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--kind-bg);
+  color: var(--kind-text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
 }
 
 .task-card .task-title {
   flex: 1;
+  min-width: 0;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 20px;
   color: var(--color-on-surface);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* ---------- Task log: reads like a document; only code/diff is monospace ---------- */
 .task-card .task-log {
   margin: 0;
-  padding: var(--space-sm);
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 420px;
+  padding: 12px var(--space-sm) 14px;
+  max-height: 460px;
   overflow-y: auto;
   scrollbar-gutter: stable;
-  background: var(--color-surface-strong);
-  color: #d4d4d8;
-  font-family: var(--font-mono);
-  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-on-surface);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
 }
 
 .task-card .log-show-older {
   position: sticky;
-  top: 0;
+  top: -12px;
   z-index: 1;
   display: block;
-  width: 100%;
-  padding: 5px 8px;
+  width: calc(100% + 2 * var(--space-sm));
+  margin: -12px calc(-1 * var(--space-sm)) 8px;
+  padding: 6px 8px;
   border: 0;
   border-bottom: 1px solid var(--color-border);
   border-radius: 0;
-  background: var(--color-surface-strong);
+  background: var(--color-neutral);
   color: var(--color-primary);
   font: inherit;
+  font-size: 12px;
   cursor: pointer;
 }
 
 .task-card .log-show-older:hover {
+  background: var(--color-tertiary);
+}
+
+.task-card .log-empty {
+  color: var(--color-on-surface-muted);
+  font-style: italic;
+}
+
+.task-card .log-text {
+  white-space: pre-wrap;
+}
+
+.task-card .log-blank {
+  height: 8px;
+}
+
+.task-card .log-heading {
+  margin: 10px 0 4px;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 20px;
+  color: var(--color-on-surface);
+}
+
+.task-card .log-heading:first-child {
+  margin-top: 0;
+}
+
+.task-card .log-inline-code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--color-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.task-card .log-code {
+  margin: 6px 0 8px;
+  padding: 8px 0;
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
   background: var(--color-neutral);
+  color: var(--color-on-surface);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
-.task-card .log-line {
+.task-card .log-code-line {
   display: block;
-  padding: 2px 0;
+  padding: 0 12px;
+  white-space: pre;
 }
 
-.task-card .log-line.log-info {
+.task-card .log-code-line.code-add {
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+}
+
+.task-card .log-code-line.code-del {
+  background: rgba(244, 63, 94, 0.1);
+  color: #be123c;
+}
+
+.task-card .log-code-line.code-meta {
   color: var(--color-on-surface-muted);
 }
 
-.task-card .log-line.log-success {
-  color: #34d399;
+[data-theme="dark"] .task-card .log-code {
+  background: #0b0b0f;
 }
 
-.task-card .log-line.log-warning {
+[data-theme="dark"] .task-card .log-code-line.code-add {
+  background: rgba(16, 185, 129, 0.14);
+  color: #6ee7b7;
+}
+
+[data-theme="dark"] .task-card .log-code-line.code-del {
+  background: rgba(244, 63, 94, 0.14);
+  color: #fda4af;
+}
+
+/* Status lines (❌ ⚠️ 🔧 ✅ ℹ️) */
+.task-card .log-status {
+  margin: 2px 0;
+  white-space: pre-wrap;
+}
+
+.task-card .log-tool,
+.task-card .log-info {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--color-neutral);
+  color: var(--color-on-surface-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.task-card .log-tool {
+  font-family: var(--font-mono);
+}
+
+.task-card .log-success {
+  color: var(--status-done-text);
+  font-weight: 500;
+}
+
+.task-card .log-warning {
+  color: #b45309;
+}
+
+[data-theme="dark"] .task-card .log-warning {
   color: #fbbf24;
 }
 
-.task-card .log-line.log-error {
-  color: #fb7185;
-}
-
-.task-card .log-line.log-tool {
-  color: #a5b4fc;
-}
-
-.task-card .log-line.log-default {
-  color: #d4d4d8;
+.task-card .log-error {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--status-error-bg);
+  color: var(--status-error-text);
 }
 
 /* ---------- Status badges (chips) ---------- */
@@ -1854,6 +2185,7 @@ button.new-run-btn {
   line-height: 20px;
   color: var(--color-on-surface-muted);
   margin-bottom: var(--space-sm);
+  box-shadow: var(--shadow-sm);
 }
 
 .panel-card {
@@ -1863,6 +2195,7 @@ button.new-run-btn {
   padding: var(--space-sm);
   margin-bottom: var(--space-lg);
   max-width: 680px;
+  box-shadow: var(--shadow-sm);
 }
 
 .panel-card-title {
@@ -2051,6 +2384,7 @@ button.new-run-btn {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
 }
 
 /* Fixed layout + nowrap: column widths come from <colgroup>, long text is cut with an ellipsis
@@ -2173,6 +2507,7 @@ button.new-run-btn {
   border-radius: var(--radius-md);
   padding: 0;
   overflow: hidden;
+  box-shadow: var(--shadow-sm);
 }
 
 .step-editor-head {
@@ -2671,8 +3006,12 @@ button.new-run-btn {
   --btn-secondary-border: #2c2c35;
   --btn-secondary-border-hover: #3a3a45;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
-  --shadow-md: 0 6px 20px -4px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03);
+  --shadow-md: 0 6px 16px -4px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --shadow-lg: 0 20px 48px -12px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --shadow-region: 1px 0 0 var(--color-border), 4px 0 16px -8px rgba(0, 0, 0, 0.6);
+  --shadow-header: 0 1px 0 var(--color-border), 0 1px 3px rgba(0, 0, 0, 0.4);
   --shadow-glow: 0 0 0 3px rgba(129, 140, 248, 0.2);
 
   --status-pending-bg: rgba(161, 161, 170, 0.12);
@@ -2721,27 +3060,6 @@ button.new-run-btn {
 [data-theme="dark"] .info-banner {
   background: var(--color-surface);
   border-color: var(--color-border);
-}
-
-[data-theme="dark"] .task-card {
-  border-color: var(--color-border);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-}
-
-[data-theme="dark"] .task-card .task-head {
-  background: var(--color-tertiary);
-  border-bottom-color: var(--color-border);
-}
-
-[data-theme="dark"] .task-card .task-head:hover {
-  background: #22212c;
-}
-
-[data-theme="dark"] .task-card pre,
-[data-theme="dark"] .task-card .task-log {
-  background: #07060b;
-  color: #d4d4d8;
-  border-top-color: var(--color-border);
 }
 
 [data-theme="dark"] .tool-chip {
@@ -2798,6 +3116,7 @@ button.new-run-btn {
   border-radius: var(--radius-md);
   cursor: grab;
   margin: var(--space-xs) 0 var(--space-sm);
+  box-shadow: var(--shadow-sm);
 }
 
 .workflow-canvas:active {
@@ -3297,7 +3616,7 @@ button.new-run-btn {
 .modal-panel {
   background: var(--color-surface);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-lg);
   width: 480px;
   max-width: calc(100vw - 40px);
   max-height: 70vh;
@@ -3364,6 +3683,7 @@ button.new-run-btn {
   padding: 0;
   border: 1px solid var(--color-border);
   overflow: hidden;
+  box-shadow: var(--shadow-lg);
 }
 
 .confirm-modal-close {
@@ -3521,6 +3841,10 @@ button.run-btn.danger:hover:not(:disabled) {
   background: #4285f4;
 }
 
+.usage-bar-opencode {
+  background: #6b7280;
+}
+
 .usage-section-title {
   font-size: 14px;
   font-weight: 500;
@@ -3564,15 +3888,117 @@ button.run-btn.danger:hover:not(:disabled) {
   color: var(--color-error);
 }
 
-/* ---- Run screen: agents created through spawn_agent ---- */
-.run-spawn-summary {
+/* ---- Run screen: usage against team / spawn limits ---- */
+/* Sits inside .run-pinned, under the run header. */
+.run-stats-wrap {
+  margin-top: 12px;
+}
+
+/* All limits in one card, one column each, split by hairlines. */
+.run-stats-card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 8px 14px;
-  margin-bottom: var(--space-sm);
-  font-size: 12px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.run-stats {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.run-stat {
+  --stat-fill: var(--color-primary);
+  flex: 1 1 140px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 16px;
+  border-left: 1px solid var(--color-border);
+  /* Hides the divider of the first column on each wrapped row. */
+  margin-left: -1px;
+}
+
+.run-stat.run-stat-group-start {
+  border-left-color: var(--btn-secondary-border-hover);
+}
+
+.run-stat.is-high {
+  --stat-fill: var(--palette-amber);
+}
+
+.run-stat.is-full {
+  --stat-fill: var(--palette-rose);
+}
+
+.run-stat.is-full .run-stat-value {
+  color: var(--status-error-text);
+}
+
+.run-stat-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--color-on-surface-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.run-stat-note {
+  color: var(--status-running-text);
+  font-weight: 600;
+}
+
+.run-stat-value {
+  margin-top: 2px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
   color: var(--color-on-surface);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.run-stat-max {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-on-surface-muted);
+}
+
+.run-stat-bar {
+  height: 3px;
+  margin-top: auto;
+  border-radius: var(--radius-full);
+  background: var(--color-tertiary);
+  overflow: hidden;
+}
+
+/* Keeps a little air between value and bar when the column is no taller than its content. */
+.run-stat-value + .run-stat-bar {
+  margin-top: 6px;
+}
+
+.run-stat-bar-fill {
+  height: 100%;
+  min-width: 2px;
+  border-radius: var(--radius-full);
+  background: var(--stat-fill);
+  transition: width 0.3s ease;
+}
+
+.run-stats-warn {
+  padding: 7px 16px;
+  border-top: 1px solid rgba(var(--color-error-rgb), 0.25);
+  background: var(--status-error-bg);
+  color: var(--status-error-text);
+  font-size: 12px;
 }
 
 .task-card .task-spawn-meta {
@@ -3580,7 +4006,8 @@ button.run-btn.danger:hover:not(:disabled) {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  padding: 4px var(--space-sm);
+  padding: 6px var(--space-sm);
+  background: var(--color-neutral);
   font-size: 12px;
   color: var(--color-on-surface-muted);
   border-bottom: 1px solid var(--color-border);
@@ -3662,6 +4089,7 @@ button.run-btn.danger:hover:not(:disabled) {
 .workflow-type-option:hover {
   border-color: var(--color-primary);
   background: var(--color-neutral);
+  box-shadow: var(--shadow-md);
 }
 
 .workflow-type-option-title {
@@ -3771,6 +4199,7 @@ button.run-btn.danger:hover:not(:disabled) {
   padding: 28px 20px;
   min-height: 420px;
   overflow: auto;
+  box-shadow: var(--shadow-sm);
 }
 
 .team-node {
@@ -4034,6 +4463,68 @@ button.run-btn.danger:hover:not(:disabled) {
   border-color: var(--color-border);
 }
 
+.task-card .task-copy {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-on-surface-muted);
+  cursor: pointer;
+}
+
+.task-card .task-copy:hover {
+  color: var(--color-on-surface);
+  border-color: var(--color-border);
+}
+
+.task-card .task-copy.is-copied {
+  color: var(--status-done-text);
+}
+
+/* A chat turn's message, in full: selectable, three lines until "Show more". */
+.task-card .task-message {
+  padding: 10px var(--space-sm) 12px;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.task-card .task-message .prompt {
+  font-size: 14px;
+  line-height: 21px;
+  color: var(--color-on-surface);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+
+.task-card .task-message .prompt-clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.task-card .task-message .prompt-toggle {
+  margin-top: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.task-card .task-message .prompt-toggle:hover {
+  text-decoration: underline;
+}
+
 .run-meta-branch {
   font-family: var(--font-mono);
 }
@@ -4054,12 +4545,15 @@ button.run-btn.danger:hover:not(:disabled) {
 
 .run-review-bar-info h3 {
   margin: 0;
-  font-size: 15px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
 }
 
 .run-review-bar-info p {
   margin: 2px 0 0;
-  font-size: 13px;
+  font-size: 12.5px;
+  line-height: 18px;
   color: var(--color-on-surface-muted);
 }
 
@@ -4069,7 +4563,7 @@ button.run-btn.danger:hover:not(:disabled) {
 }
 
 .run-review-bar .review-del {
-  color: #ff7b72;
+  color: var(--status-error-text);
   font-style: normal;
   font-weight: 600;
 }
@@ -4467,6 +4961,23 @@ button.run-btn.danger:hover:not(:disabled) {
   color: var(--color-on-surface-muted);
 }
 
+/* Heading over one group of fields inside a section (e.g. Limits: Time / Agents / Tokens). */
+.detail-subgroup-title {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-on-surface-muted);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.detail-subgroup-title:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
 .settings-row {
   display: grid;
   grid-template-columns: minmax(110px, 150px) minmax(120px, 1fr) minmax(120px, 1fr) auto 32px;
@@ -4584,85 +5095,306 @@ button.run-btn.danger:hover:not(:disabled) {
 
 /* Run tab: which agents/providers a call tried before one did the work. */
 .task-card .task-fallback {
-  padding: 4px var(--space-sm);
+  padding: 6px var(--space-sm);
   font-size: 12px;
-  color: var(--status-running-text);
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.08);
   border-bottom: 1px solid var(--color-border);
 }
 
-/* ---- Detail pages: form on the left, AI assistant pinned on the right ---- */
-.detail-with-aside {
-  display: grid;
-  grid-template-columns: minmax(0, 880px) auto;
-  gap: var(--space-md);
-  align-items: start;
+[data-theme="dark"] .task-card .task-fallback {
+  color: #fbbf24;
 }
 
-.detail-with-aside-wide {
-  grid-template-columns: minmax(0, 1fr) auto;
+/* ---- Detail pages: form, with the AI assistant docked as a collapsible right sidebar ---- */
+.detail-shell {
+  --dock-width: 380px;
+  position: relative;
+  display: flex;
+  height: 100%;
+  min-height: 0;
 }
 
-.detail-aside {
-  position: sticky;
-  top: 0;
+.detail-shell > .detail-page {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
+.detail-dock {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 0;
+  width: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-surface);
+  transition:
+    flex-basis 0.22s ease,
+    width 0.22s ease,
+    box-shadow 0.22s ease;
+}
+
+.detail-shell.aside-open .detail-dock {
+  flex-basis: var(--dock-width);
+  width: var(--dock-width);
+  box-shadow:
+    -1px 0 0 var(--color-border),
+    -4px 0 16px -8px rgba(17, 17, 24, 0.12);
+}
+
+[data-theme="dark"] .detail-shell.aside-open .detail-dock {
+  box-shadow:
+    -1px 0 0 var(--color-border),
+    -4px 0 16px -8px rgba(0, 0, 0, 0.6);
+}
+
+/* Fixed inner width so the content doesn't reflow while the dock slides. */
+.detail-dock-inner {
+  width: var(--dock-width);
+  height: 100%;
+}
+
+/* Toolbar toggle */
+.aside-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--btn-secondary-border);
+  border-radius: var(--radius-sm);
+  background: var(--btn-secondary-bg);
+  color: var(--color-on-surface);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: var(--shadow-xs);
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.aside-toggle svg {
+  color: var(--color-primary);
+}
+
+.aside-toggle:hover {
+  background: var(--btn-secondary-bg-hover);
+  border-color: var(--btn-secondary-border-hover);
+}
+
+.aside-toggle.is-open {
+  background: rgba(var(--color-primary-rgb), 0.1);
+  border-color: rgba(var(--color-primary-rgb), 0.35);
+  color: var(--color-primary);
+}
+
+.aside-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px rgba(var(--color-primary-rgb), 0.55);
+}
+
+/* ---- Assistant panel ---- */
 .assistant-panel {
-  width: 340px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
 
 .assistant-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-top: 8px;
-  padding-bottom: 8px;
+  min-height: 56px;
+  padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.assistant-head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-on-surface);
+}
+
+.assistant-head-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  background: rgba(var(--color-primary-rgb), 0.12);
+  color: var(--color-primary);
 }
 
 .assistant-head-actions {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
 }
 
-.assistant-body {
-  min-height: 0;
+.assistant-head-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-on-surface-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    color 0.12s;
+}
+
+.assistant-head-btn:hover {
+  background: var(--color-tertiary);
+  color: var(--color-on-surface);
+}
+
+.assistant-close {
+  padding: 0;
+}
+
+.assistant-config {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-neutral);
+}
+
+.assistant-config .flow-desc {
+  grid-column: 1 / -1;
+}
+
+.assistant-select {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-on-surface);
+  font: inherit;
+  font-size: 12px;
 }
 
 .assistant-messages {
-  max-height: calc(100vh - 420px);
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+  padding: 16px;
+}
+
+.assistant-empty {
+  margin: auto 8px;
+  text-align: center;
+  color: var(--color-on-surface-muted);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.assistant-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 10px;
+  border-radius: var(--radius-full);
+  background: rgba(var(--color-primary-rgb), 0.1);
+  color: var(--color-primary);
+}
+
+.assistant-empty p {
+  margin: 0;
 }
 
 .assistant-msg {
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  max-width: 88%;
+  padding: 9px 12px;
   font-size: 13px;
-  line-height: 19px;
+  line-height: 20px;
   color: var(--color-on-surface);
 }
 
 .assistant-msg-user {
   align-self: flex-end;
-  max-width: 90%;
-  background: var(--color-neutral);
+  border-radius: 12px 12px 4px 12px;
+  background: var(--color-primary);
+  color: var(--color-primary-contrast);
 }
 
 .assistant-msg-assistant {
-  border: 1px solid var(--color-border);
+  align-self: flex-start;
+  border-radius: 12px 12px 12px 4px;
+  background: var(--color-tertiary);
 }
 
 .assistant-msg-failed {
+  background: var(--status-error-bg);
   color: var(--status-error-text);
 }
 
 .assistant-msg-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   color: var(--color-on-surface-muted);
+}
+
+.assistant-typing {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.assistant-typing span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: assistant-typing 1.2s ease-in-out infinite;
+}
+
+.assistant-typing span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.assistant-typing span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes assistant-typing {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
 }
 
 .assistant-msg-text {
@@ -4682,6 +5414,11 @@ button.run-btn.danger:hover:not(:disabled) {
   color: var(--color-on-surface-muted);
 }
 
+.assistant-msg-applied {
+  color: var(--status-done-text);
+  font-weight: 500;
+}
+
 .assistant-undo {
   background: none;
   border: none;
@@ -4694,36 +5431,123 @@ button.run-btn.danger:hover:not(:disabled) {
 }
 
 .assistant-msg-errors {
-  margin-bottom: 0;
+  margin: 0;
   padding-left: 18px;
   font-size: 12px;
   color: var(--status-error-text);
 }
 
-.assistant-actions {
+.assistant-composer {
+  flex: 0 0 auto;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--color-border);
+}
+
+.assistant-composer .error-box {
+  margin: 0 0 8px;
+}
+
+.assistant-input {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-xs);
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+
+.assistant-input:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(var(--color-primary-rgb), 0.15);
+}
+
+.assistant-input.is-disabled {
+  background: var(--color-neutral);
+}
+
+.assistant-input textarea {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  max-height: 200px;
+  padding: 10px 12px 4px;
+  border: 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
+  color: var(--color-on-surface);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  resize: none;
+}
+
+.assistant-input textarea:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+.assistant-input-bar {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 8px 12px;
 }
 
-.assistant-actions button.run-btn {
-  width: auto;
-  margin-top: 0;
+.assistant-input-hint {
+  font-size: 11px;
+  color: var(--color-on-surface-muted);
 }
 
-button.assistant-expand {
-  white-space: nowrap;
+.assistant-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary);
+  color: var(--color-primary-contrast);
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    opacity 0.15s;
 }
 
+.assistant-send:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.assistant-send:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.assistant-send:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px rgba(var(--color-primary-rgb), 0.55);
+}
+
+/* Narrow screens: the dock floats over the form instead of squeezing it. */
 @media (max-width: 1100px) {
-  .detail-with-aside {
-    grid-template-columns: 1fr;
+  .detail-dock {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
   }
-  .detail-aside {
-    position: static;
-    order: -1;
+
+  .detail-shell.aside-open .detail-dock {
+    width: min(var(--dock-width), 100%);
+    box-shadow: var(--shadow-lg);
   }
-  .assistant-panel {
-    width: auto;
-    max-height: 520px;
+
+  .detail-dock-inner {
+    width: min(var(--dock-width), 100vw);
   }
 }

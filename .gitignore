@@ -9,10 +9,18 @@ node_modules
 client/dist
 
 # Runtime state, not source.
-# runs.json holds full run history: your prompts and the agents' logs.
+# server/runs/ holds full run history (one file per run): your prompts and the agents' logs.
+# runs.json is its pre-split form, kept as runs.json.migrated after the first start.
 # server/plugins/ holds plugin repos cloned at install time (third-party code).
+server/runs/
 server/runs.json
+server/runs.json.migrated
 server/plugins/
+# OpenRouter API keys saved on the Providers page.
+server/providers.config.json
+# Left behind by an interrupted save, or set aside when a data file failed to parse.
+server/*.tmp
+server/*.corrupt-*
 
 # Server logs
 *.log

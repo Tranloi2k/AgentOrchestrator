@@ -2,19 +2,19 @@
  * Skills: reusable instruction blocks attached to agents. CRUD plus persistence to
  * skills.config.json, loaded once at startup and kept in memory.
  */
-import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { nanoid } from "nanoid";
 import { listAgents } from "../agents/agents.store.js";
 import { listWorkflows } from "../workflows/workflows.store.js";
-import { SERVER_DIR, loadJson } from "../../core/config.js";
+import { SERVER_DIR } from "../../core/config.js";
+import { loadJson, saveJson } from "../../core/json-file.js";
 
 const SKILLS_FILE = path.join(SERVER_DIR, "skills.config.json");
 
 let SKILLS = loadJson(SKILLS_FILE, []);
 
 function saveSkills() {
-  writeFileSync(SKILLS_FILE, JSON.stringify(SKILLS, null, 2), "utf-8");
+  saveJson(SKILLS_FILE, SKILLS);
 }
 
 function listSkills() {

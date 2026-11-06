@@ -1,22 +1,24 @@
 /**
- * Run history: the in-memory run map, its persistence to runs.json, the event bus the
- * WebSocket broadcasts from, and the read-side views (summaries, usage totals). Also owns the
+ * Run history: the in-memory run map, its persistence to server/runs/<runId>.json, the event bus
+ * the WebSocket broadcasts from, and the read-side views (summaries, usage totals). Also owns the
  * per-run "stop requested" flag, since summaries report it.
  */
-import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { nanoid } from "nanoid";
 import { acceptWorkspaceReview, declineWorkspaceReview } from "../workspace/workspace.js";
 import { shouldRenderLogLine } from "../../core/log-utils.js";
-import { SERVER_DIR, PROVIDERS, loadJson } from "../../core/config.js";
+import { SERVER_DIR, PROVIDERS } from "../../core/config.js";
 import { teamLimitSummary } from "./team-calls.js";
 import { ASSISTANT_RUN_PREFIX } from "../assistant/assistant-model.js";
+import { loadRunFiles, writeRunFile, removeRunFile, migrateLegacyRuns } from "./run-files.js";
 
-const RUNS_FILE = path.join(SERVER_DIR, "runs.json");
+const RUNS_DIR = path.join(SERVER_DIR, "runs");
+// Where all runs used to live in one file; split into RUNS_DIR on the first start after upgrading.
+const LEGACY_RUNS_FILE = path.join(SERVER_DIR, "runs.json");
 
 /** --------------------------- runs --------------------------- */
 
-/** In-memory store: runId -> run object, persisted to runs.json so history/logs survive a
+/** In-memory store: runId -> run object, persisted one file per run so history/logs survive a
  * server restart (previously in-memory only — lost on every restart). */
 const runs = new Map();
 
@@ -34,11 +36,33 @@ const runs = new Map();
  */
 let lastClaudeQuota = null;
 
+/** Runs changed since the last save. Only these get rewritten, so a save costs one run's size
+ * rather than the whole history's. */
+const dirty = new Set();
+/** Runs that were `running` at the last save — saved once more after they stop, so their final
+ * state lands even if the change that ended them never named the run. */
+let runningAtLastSave = new Set();
+
+function markDirty(runId) {
+  if (runId) dirty.add(runId);
+}
+
+/** Writes every run that may have changed: those marked dirty, plus any running (or just
+ * finished) run — the executor mutates running runs in place (checkpoints, session ids) without
+ * always saying which, and this catches those without a full-history write. */
 function saveRuns() {
-  try {
-    writeFileSync(RUNS_FILE, JSON.stringify([...runs.values()], null, 2), "utf-8");
-  } catch (err) {
-    console.error("[orchestrator] Không lưu được runs.json:", err.message);
+  const nowRunning = new Set([...runs.values()].filter((r) => r.status === "running").map((r) => r.id));
+  const ids = new Set([...dirty, ...nowRunning, ...runningAtLastSave]);
+  dirty.clear();
+  runningAtLastSave = nowRunning;
+  for (const id of ids) {
+    const run = runs.get(id);
+    if (!run) continue; // deleted since it was marked
+    try {
+      writeRunFile(RUNS_DIR, run);
+    } catch (err) {
+      console.error(`[orchestrator] Không lưu được run ${id}:`, err.message);
+    }
   }
 }
 
@@ -47,7 +71,8 @@ function saveRuns() {
 // lands soon after any change — including the very last event of a run, since the timeout
 // re-reads `runs` fresh when it fires, not a stale snapshot taken when it was scheduled.
 let saveRunsTimer = null;
-function scheduleSaveRuns() {
+function scheduleSaveRuns(runId) {
+  markDirty(runId);
   if (saveRunsTimer) return;
   saveRunsTimer = setTimeout(() => {
     saveRunsTimer = null;
@@ -60,9 +85,11 @@ function scheduleSaveRuns() {
  * resumed, so it's marked as errored rather than silently stuck "running" forever. Whatever
  * log/output had already accumulated before the crash is kept as-is. */
 function loadRuns() {
-  const raw = loadJson(RUNS_FILE, []);
+  migrateLegacyRuns(LEGACY_RUNS_FILE, RUNS_DIR);
+  const raw = loadRunFiles(RUNS_DIR);
   for (const r of raw) {
     if (r.status === "running") {
+      markDirty(r.id);
       r.status = "error";
       r.error =
         r.error ||
@@ -81,6 +108,7 @@ function loadRuns() {
     }
     runs.set(r.id, r);
   }
+  saveRuns(); // persists the interrupted runs fixed up above, if any
 }
 loadRuns();
 
@@ -121,7 +149,7 @@ function emit(event) {
       /* ignore */
     }
   }
-  scheduleSaveRuns();
+  scheduleSaveRuns(event.runId);
 }
 
 function pushTaskLog(runId, taskId, line) {
@@ -153,6 +181,7 @@ function summarize(run, { includeReviewPatch = false } = {}) {
     : null;
   return {
     id: run.id,
+    title: run.title || null,
     prompt: run.prompt,
     agentId: run.agentId,
     workflowId: run.workflowId,
@@ -209,7 +238,7 @@ function summarize(run, { includeReviewPatch = false } = {}) {
  * persisted runs into per-provider totals, plus a per-agent breakdown so "which agent burns the
  * most tokens" is answerable without scraping run history by hand. Recomputed on each request
  * rather than kept as a running counter — usage figures live on the tasks themselves (already
- * persisted in runs.json), so this is just an aggregate view over data that already exists, and
+ * persisted in server/runs/), so this is just an aggregate view over data that already exists, and
  * staying stateless means deleting/clearing run history is automatically reflected too.
  */
 function getUsageSummary() {
@@ -309,6 +338,22 @@ async function declineRunReview(runId) {
   return true;
 }
 
+const MAX_RUN_TITLE = 120;
+
+/** Sets the name shown for a run in the history list (the prompt is shown when it has none).
+ * An empty title clears it. Allowed while the run is still going — it's only a label. */
+function renameRun(id, title) {
+  const run = runs.get(id);
+  if (!run) return false;
+  const clean = String(title ?? "").trim().slice(0, MAX_RUN_TITLE);
+  if (clean) run.title = clean;
+  else delete run.title;
+  markDirty(id);
+  saveRuns();
+  emit({ runId: id, type: "run-renamed", title: run.title || null });
+  return true;
+}
+
 /** Deletes one run from history. Refuses to delete a still-`running` run — its spawned CLI
  * process is still writing into `run.tasks[].log` by reference; deleting the Map entry out
  * from under it wouldn't stop that process, just orphan its output nowhere the UI can show it. */
@@ -322,7 +367,7 @@ function deleteRun(id) {
     throw new Error("Hãy Accept hoặc Decline thay đổi trước khi xoá run.");
   }
   runs.delete(id);
-  saveRuns();
+  removeRunFile(RUNS_DIR, id);
   emit({ runId: id, type: "run-deleted" });
   return true;
 }
@@ -337,10 +382,10 @@ function clearRuns() {
       kept++;
     } else {
       runs.delete(id);
+      removeRunFile(RUNS_DIR, id);
       cleared++;
     }
   }
-  saveRuns();
   emit({ type: "runs-cleared" });
   return { cleared, kept };
 }
@@ -399,6 +444,7 @@ export {
   getUsageSummary,
   acceptRunReview,
   declineRunReview,
+  renameRun,
   deleteRun,
   clearRuns,
 };

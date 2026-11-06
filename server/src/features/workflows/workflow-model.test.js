@@ -203,14 +203,14 @@ test("team: a member's agent list must be non-empty, known and without duplicate
 
 test("team limits: safe defaults for teams saved without them, carried on the coordinator node", () => {
   const wf = normalizeWorkflowInput({ type: "team", team: { coordinator: { agentId: "a1" }, members: [{ alias: "fe", agentId: "a2", role: "x" }] } });
-  assert.deepEqual(wf.team.limits, { maxDelegations: 30, callTimeoutMinutes: 30, runTokenBudget: 2_000_000 });
+  assert.deepEqual(wf.team.limits, { maxDelegations: 30, callTimeoutMinutes: 30, runTokenBudget: 2_000_000, maxParallel: 3 });
   assert.deepEqual(wf.nodes.find((n) => n.id === COORDINATOR_NODE_ID).teamLimits, wf.team.limits);
 
   const custom = normalizeWorkflowInput({
     type: "team",
-    team: { coordinator: { agentId: "a1" }, members: [], limits: { maxDelegations: "5", callTimeoutMinutes: 0, runTokenBudget: 0 } },
+    team: { coordinator: { agentId: "a1" }, members: [], limits: { maxDelegations: "5", callTimeoutMinutes: 0, runTokenBudget: 0, maxParallel: 99 } },
   });
-  assert.deepEqual(custom.team.limits, { maxDelegations: 5, callTimeoutMinutes: 1, runTokenBudget: 0 }, "0 tokens = no limit; a timeout is at least a minute");
+  assert.deepEqual(custom.team.limits, { maxDelegations: 5, callTimeoutMinutes: 1, runTokenBudget: 0, maxParallel: 20 }, "0 tokens = no limit; a timeout is at least a minute; at most 20 at once");
 });
 
 test("workflowAgentIds: main agents, team backups and pipeline fallbacks all count as in use", () => {

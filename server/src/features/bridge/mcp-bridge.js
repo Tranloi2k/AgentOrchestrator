@@ -33,6 +33,11 @@ const WORKFLOW_ID = process.env.AGENT_BRIDGE_WORKFLOW_ID || "";
 const CALLER_NODE_ID = process.env.AGENT_BRIDGE_CALLER_NODE_ID || "";
 const DEPTH = Number(process.env.AGENT_BRIDGE_DEPTH || "0");
 const CWD = process.env.AGENT_BRIDGE_CWD || process.cwd();
+const MAX_PARALLEL = Number(process.env.AGENT_BRIDGE_MAX_PARALLEL || "0");
+// How many of ask_agent/spawn_agent run at once; the server queues the rest (team-calls.js acquireSlot).
+const PARALLEL_NOTE = MAX_PARALLEL
+  ? `Tối đa ${MAX_PARALLEL} agent chạy CÙNG LÚC trong run (gồm cả ask_agent và spawn_agent): gọi nhiều hơn thì phần dư tự xếp hàng chờ tới lượt, nên chia việc thành nhóm vừa đủ thay vì giao ồ ạt. `
+  : "";
 const parseJson = (value, fallback) => {
   try {
     return value ? JSON.parse(value) : fallback;
@@ -92,6 +97,9 @@ const text = (t, isError = false) => ({ content: [{ type: "text", text: t }], ..
 
 const server = new McpServer({ name: "agent-bridge", version: "1.0.0" });
 
+// ask_agent / spawn_agent wait for another agent to finish; marked so the CLI may run several at once.
+const PARALLEL_SAFE = { readOnlyHint: true };
+
 if (CALLABLE.length) {
   const callableList = CALLABLE.map((n) => `- id="${n.id}" tên="${n.name}" — ${n.description || ""}`).join("\n");
   // Team members fail over to their own backup agents on the server. Pipeline nodes have one
@@ -105,11 +113,17 @@ if (CALLABLE.length) {
     "ask_agent",
     {
       title: "Hỏi một agent khác trong workflow",
+      // Not about what the tool does (the server enforces that): Claude Code runs an MCP tool in
+      // parallel with others only when it is marked read-only, and handing work to several agents
+      // at once is the point. Without it, calls in one message run one after another.
+      annotations: PARALLEL_SAFE,
       description:
         "Gọi trực tiếp một agent khác (1 bước khác) trong CÙNG workflow này, gửi câu hỏi/nhiệm vụ, và CHỜ nhận câu trả lời đầy đủ của nó rồi mới tiếp tục việc của bạn. " +
         "Mỗi công việc logic chỉ được thuộc MỘT agent. Giữ nguyên workItemId khi yêu cầu cùng agent làm tiếp/sửa tiếp; agent đó nhớ các lần trước của công việc này. " +
         ownershipRule +
-        "Nếu chia yêu cầu gốc thành công việc mới thật sự khác, dùng workItemId mới và khai báo parentWorkItemId.\n\n" +
+        "Nếu chia yêu cầu gốc thành công việc mới thật sự khác, dùng workItemId mới và khai báo parentWorkItemId. " +
+        PARALLEL_NOTE +
+        "\n\n" +
         (WORK_ITEMS
           ? "Mỗi công việc mà thành viên được ghi file làm sẽ có một worktree git riêng, nên nhiều thành viên có thể làm song song mà không ghi đè nhau. " +
             "Khi giao cho thành viên chỉ đọc (vd reviewer) review một công việc, truyền reviewOf = workItemId của công việc đó để nó đọc đúng thư mục; reviewer kết thúc bằng REVIEW: PASS hoặc REVIEW: FAIL. " +
@@ -212,6 +226,7 @@ if (SPAWN_POLICY) {
     adHoc && p.providers.includes("claude") && `- model Claude: mặc định của CLI (bỏ trống)${p.claudeModels?.length ? ", " + p.claudeModels.join(", ") : ""}`,
     adHoc && p.providers.includes("codex") && `- model Codex: mặc định của CLI (bỏ trống)${p.codexModels?.length ? ", " + p.codexModels.join(", ") : ""}`,
     adHoc && p.providers.includes("gemini") && `- model Gemini (agy): mặc định của CLI (bỏ trống)${p.geminiModels?.length ? ", " + p.geminiModels.join(", ") : ""}`,
+    adHoc && p.providers.includes("opencode") && `- model OpenCode (OpenRouter): model mặc định của kết nối (bỏ trống)${p.opencodeModels?.length ? ", " + p.opencodeModels.join(", ") : ""}`,
     adHoc && `- accessLevel: ${allowedLevels.join(", ")} (read = chỉ đọc, write = sửa trong workspace, full = toàn quyền; bỏ trống = read; tối đa ${p.maxAccessLevel || "read"}${p.ceilingSource === "team" ? " theo cài đặt của Team" : ", quyền của bạn"})`,
     adHoc && p.providers.includes("claude") && `- tool cho agent Claude: ${list(p.toolCeiling)} (bỏ trống "tools" = tất cả tool này; không bao giờ có Task)`,
     `- tối đa ${p.maxAgents} agent cho cả run (mỗi workItemId của một blueprint hoặc một name tính là 1 agent, dù sửa bao nhiêu vòng)`,
@@ -223,10 +238,13 @@ if (SPAWN_POLICY) {
     "spawn_agent",
     {
       title: "Tạo một agent mới để giao việc",
+      annotations: PARALLEL_SAFE, // see ask_agent
       description:
         "Tạo một agent MỚI để làm một phần việc, rồi CHỜ nhận kết quả của nó. " +
         "Agent mới KHÔNG thấy hội thoại của bạn: prompt phải tự đầy đủ bối cảnh, mục tiêu và nói rõ cần trả về gì. " +
-        "Nhiều lời gọi có thể chạy song song. Không tạo agent cho việc nhỏ bạn tự làm nhanh hơn.\n\n" +
+        "Các việc độc lập nên chạy SONG SONG: gọi nhiều spawn_agent trong CÙNG MỘT lượt trả lời (mỗi việc một workItemId), các agent sẽ chạy cùng lúc. " +
+        PARALLEL_NOTE +
+        "Gọi lần lượt từng lượt thì chúng chạy nối tiếp. Không tạo agent cho việc nhỏ bạn tự làm nhanh hơn.\n\n" +
         (blueprints.length
           ? "Blueprint là một vai trò Team đã định nghĩa sẵn (hướng dẫn, skill, quyền và thứ tự provider riêng): truyền blueprint cùng workItemId. " +
             "Hệ thống tự chọn provider: bỏ qua provider chưa cài hoặc đang hết quota, và tự chuyển sang provider tiếp theo khi provider trước không làm được việc. " +
@@ -237,6 +255,10 @@ if (SPAWN_POLICY) {
             ", như viết một subagent: đặt name (ngắn, kebab-case, vd backend-dev), role (một câu), instructions (system prompt: chuyên môn, cách làm, chuẩn đầu ra), " +
             "chọn provider/model/accessLevel cần thiết, và workItemId. Gọi lại với CÙNG name và CÙNG workItemId để agent đó làm tiếp/sửa tiếp (nó nhớ các lần trước).\n"
           : "") +
+        "DÙNG LẠI AGENT: một agent (một name hoặc blueprint) làm được nhiều việc liên tiếp. Giao việc MỚI cho agent đã có bằng CÙNG name/blueprint với workItemId MỚI " +
+        "(agent tự định nghĩa: chỉ cần name, không phải viết lại role/instructions/provider): KHÔNG tốn thêm slot, và agent nhớ những gì đã đọc và làm. " +
+        "Chỉ tạo name mới khi cần một chuyên môn khác. Hai việc chạy SONG SONG trên cùng một name sẽ tốn thêm một slot cho bản sao thứ hai; " +
+        "việc nối tiếp nhau thì không.\n" +
         (TEAM_GUIDE ? `${TEAM_GUIDE}\n\n` : "\n") +
         (adHoc ? "Giới hạn (hệ thống kiểm tra, ngoài danh sách sẽ bị từ chối):\n" : "Chỉ được tạo agent từ các blueprint ở trên. Giới hạn:\n") +
         policyText,
@@ -245,7 +267,7 @@ if (SPAWN_POLICY) {
         workItemId: z.string().min(1).max(80).optional().describe("Mã ổn định của công việc, giữ nguyên cho các lần làm tiếp/sửa tiếp. Bắt buộc khi dùng blueprint hoặc name"),
         ...(adHoc
           ? {
-              name: z.string().max(40).optional().describe("Chỉ khi không dùng blueprint. Tên ngắn của agent mới (chữ thường, số, -), vd backend-dev; giữ nguyên để làm tiếp"),
+              name: z.string().max(40).optional().describe("Chỉ khi không dùng blueprint. Tên ngắn của agent (chữ thường, số, -), vd backend-dev. Tên đã tạo trong run = dùng lại đúng agent đó (không cần role/instructions/provider)"),
               role: z.string().max(300).optional().describe("Chỉ khi không dùng blueprint. Vai trò của agent mới, một câu"),
               instructions: z.string().max(20000).optional().describe("Chỉ khi không dùng blueprint. System prompt cho agent mới: chuyên môn, cách làm, chuẩn đầu ra"),
               provider: z.string().optional().describe(`Chỉ khi không dùng blueprint. Provider của agent mới: ${list(p.providers)}. Bắt buộc nếu được phép nhiều hơn 1 provider.`),
@@ -277,7 +299,13 @@ if (SPAWN_POLICY) {
         });
         if (!ok) return text(`Không tạo được agent: ${data.error || `HTTP ${status}`}`, true);
         const u = data.usage || {};
-        const footer = `\n\n---\n(Đã tạo ${u.spawned}/${u.maxAgents} agent trong run này; agent con đã dùng ${u.tokensUsed}${u.tokenBudget ? "/" + u.tokenBudget : ""} token.)`;
+        // Who already exists, so the next spawn_agent reuses one instead of taking a new slot.
+        const roster = (u.agents || [])
+          .map((a) => `- ${a.name}${a.provider ? ` (${a.provider})` : ""}: ${a.workItems.length} việc [${a.workItems.join(", ")}], ${a.busy ? "đang chạy" : "rảnh"}`)
+          .join("\n");
+        const footer =
+          `\n\n---\n(Đã tạo ${u.spawned}/${u.maxAgents} agent trong run này; agent con đã dùng ${u.tokensUsed}${u.tokenBudget ? "/" + u.tokenBudget : ""} token.)` +
+          (roster ? `\nAgent đã có, giao việc mới bằng cùng name + workItemId mới (không tốn slot):\n${roster}` : "");
         // A blueprint spawn says which provider did the work and why earlier ones were left.
         const by = data.agent ? `\n(Thực hiện bởi ${data.agent.name} · ${data.agent.provider})` : "";
         const left = (data.stopped || [])

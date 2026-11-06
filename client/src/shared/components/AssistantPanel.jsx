@@ -1,10 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { usePreferences } from "../../app/PreferencesContext.jsx";
-import Button from "./Button.jsx";
-import { Select } from "./Input.jsx";
+import { IconClose, IconSend, IconSparkle } from "../Icons.jsx";
 import { ErrorBox, HelperText } from "./Feedback.jsx";
-import { DetailField, DetailFieldGrid } from "./DetailLayout.jsx";
 
 const STORAGE_KEY = "assistant.cli";
 const PROVIDERS = ["claude", "codex", "gemini"];
@@ -31,14 +29,14 @@ function initialChoice(meta) {
  * `onApply` (never saved here — the user reviews and saves). `formatErrors` turns the server's
  * validation errors into lines, at render time so they name nodes as the form currently does.
  */
-export default function AssistantPanel({ target, draft, onApply, onUndo, canUndo, formatErrors }) {
+export default function AssistantPanel({ target, draft, onApply, onUndo, canUndo, formatErrors, onClose }) {
   const { t } = usePreferences();
-  const [collapsed, setCollapsed] = useState(false);
   const [meta, setMeta] = useState(null);
   const [choice, setChoice] = useState({ provider: "", model: "" });
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [waited, setWaited] = useState(0); // seconds the current answer has taken so far
   const [error, setError] = useState("");
   const listRef = useRef(null);
 
@@ -52,6 +50,14 @@ export default function AssistantPanel({ target, draft, onApply, onUndo, canUndo
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [messages, busy]);
+
+  // A CLI answer takes a while; count the seconds so a slow reply doesn't look like a dead panel.
+  useEffect(() => {
+    if (!busy) return undefined;
+    setWaited(0);
+    const timer = setInterval(() => setWaited((s) => s + 1), 1000);
+    return () => clearInterval(timer);
+  }, [busy]);
 
   function pick(next) {
     setChoice(next);
@@ -99,105 +105,149 @@ export default function AssistantPanel({ target, draft, onApply, onUndo, canUndo
     }
   }
 
-  if (collapsed) {
-    return (
-      <Button variant="secondary" className="assistant-expand" onClick={() => setCollapsed(false)}>
-        ✨ {t("assistant.title")}
-      </Button>
-    );
-  }
-
   const lastApplied = messages.map((m, i) => (m.applied ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
+  const canSend = !!input.trim() && !busy && ready;
 
   return (
-    <section className="detail-section assistant-panel">
-      <div className="detail-section-header assistant-head">
-        <h3 className="detail-section-title">✨ {t("assistant.title")}</h3>
+    <section className="assistant-panel" aria-label={t("assistant.title")}>
+      <header className="assistant-head">
+        <span className="assistant-head-title">
+          <span className="assistant-head-icon">
+            <IconSparkle size={14} />
+          </span>
+          {t("assistant.title")}
+        </span>
         <span className="assistant-head-actions">
           {messages.length > 0 && !busy && (
-            <button type="button" className="run-chat-clear" onClick={() => setMessages([])}>
+            <button type="button" className="assistant-head-btn" onClick={() => setMessages([])} title={t("assistant.clear")}>
               {t("assistant.clear")}
             </button>
           )}
-          <Button variant="icon" onClick={() => setCollapsed(true)} title={t("assistant.collapse")} aria-label={t("assistant.collapse")}>
-            »
-          </Button>
+          {onClose && (
+            <button
+              type="button"
+              className="assistant-head-btn assistant-close"
+              onClick={onClose}
+              title={`${t("assistant.close")} (Ctrl+J)`}
+              aria-label={t("assistant.close")}
+            >
+              <IconClose size={12} />
+            </button>
+          )}
         </span>
-      </div>
+      </header>
 
-      <div className="detail-section-body assistant-body">
-        {meta && !installed.length ? (
+      {meta && !installed.length ? (
+        <div className="assistant-config">
           <HelperText>{t("assistant.noCli")}</HelperText>
-        ) : (
-          <DetailFieldGrid>
-            <DetailField>
-              <Select
-                title={t("assistant.cli")}
-                value={choice.provider}
-                onChange={(e) => pick({ provider: e.target.value, model: "" })}
-                options={installed.map((p) => ({ value: p, label: t(`agents.provider.${p}`) }))}
-              />
-            </DetailField>
-            <DetailField>
-              <Select
-                title={t("assistant.model")}
-                value={choice.model}
-                onChange={(e) => pick({ ...choice, model: e.target.value })}
-                options={modelsOf(meta, choice.provider).map((m) => ({ value: m.value, label: m.label }))}
-              />
-            </DetailField>
-          </DetailFieldGrid>
-        )}
-
-        {(messages.length > 0 || busy) && (
-          <div className="assistant-messages" ref={listRef}>
-            {messages.map((m, i) => (
-              <div key={i} className={`assistant-msg assistant-msg-${m.role}${m.failed ? " assistant-msg-failed" : ""}`}>
-                {m.content && <div className="assistant-msg-text">{m.content}</div>}
-                {m.parseError && <div className="assistant-msg-note">{t("assistant.parseError")}</div>}
-                {m.applied && (
-                  <div className="assistant-msg-note">
-                    {t("assistant.applied")}
-                    {i === lastApplied && canUndo && (
-                      <button type="button" className="assistant-undo" onClick={onUndo}>
-                        {t("assistant.undo")}
-                      </button>
-                    )}
-                  </div>
-                )}
-                {m.errors?.length > 0 && (
-                  <ul className="assistant-msg-errors">
-                    {(formatErrors ? formatErrors(m.errors) : m.errors.map((e) => e.code)).map((line, j) => (
-                      <li key={j}>{line}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+        </div>
+      ) : (
+        <div className="assistant-config">
+          <select
+            className="assistant-select"
+            title={t("assistant.cli")}
+            aria-label={t("assistant.cli")}
+            value={choice.provider}
+            onChange={(e) => pick({ provider: e.target.value, model: "" })}
+          >
+            {installed.map((p) => (
+              <option key={p} value={p}>
+                {t(`agents.provider.${p}`)}
+              </option>
             ))}
-            {busy && <div className="assistant-msg assistant-msg-assistant assistant-msg-pending">{t("assistant.thinking")}</div>}
+          </select>
+          <select
+            className="assistant-select"
+            title={t("assistant.model")}
+            aria-label={t("assistant.model")}
+            value={choice.model}
+            onChange={(e) => pick({ ...choice, model: e.target.value })}
+          >
+            {modelsOf(meta, choice.provider).map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div className="assistant-messages" ref={listRef}>
+        {!messages.length && !busy ? (
+          <div className="assistant-empty">
+            <span className="assistant-empty-icon">
+              <IconSparkle size={18} />
+            </span>
+            <p>{t(`assistant.empty.${target}`)}</p>
+          </div>
+        ) : (
+          messages.map((m, i) => (
+            <div key={i} className={`assistant-msg assistant-msg-${m.role}${m.failed ? " assistant-msg-failed" : ""}`}>
+              {m.content && <div className="assistant-msg-text">{m.content}</div>}
+              {m.parseError && <div className="assistant-msg-note">{t("assistant.parseError")}</div>}
+              {m.applied && (
+                <div className="assistant-msg-note assistant-msg-applied">
+                  {t("assistant.applied")}
+                  {i === lastApplied && canUndo && (
+                    <button type="button" className="assistant-undo" onClick={onUndo}>
+                      {t("assistant.undo")}
+                    </button>
+                  )}
+                </div>
+              )}
+              {m.errors?.length > 0 && (
+                <ul className="assistant-msg-errors">
+                  {(formatErrors ? formatErrors(m.errors) : m.errors.map((e) => e.code)).map((line, j) => (
+                    <li key={j}>{line}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))
+        )}
+        {busy && (
+          <div className="assistant-msg assistant-msg-assistant assistant-msg-pending">
+            <span className="assistant-typing" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+            {t("assistant.thinking", { sec: waited })}
           </div>
         )}
+      </div>
 
-        <DetailField>
+      <div className="assistant-composer">
+        <ErrorBox>{error}</ErrorBox>
+        <div className={`assistant-input ${busy || !ready ? "is-disabled" : ""}`}>
           <textarea
+            rows={3}
             value={input}
             disabled={busy || !ready}
             placeholder={t(`assistant.placeholder.${target}`)}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+              // Enter sends, Shift+Enter is a new line; not while an IME is still composing.
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 send();
               }
             }}
           />
-        </DetailField>
-        <div className="assistant-actions">
-          <Button variant="primary" disabled={!input.trim() || busy || !ready} onClick={send}>
-            {busy ? "..." : t("assistant.send")}
-          </Button>
+          <div className="assistant-input-bar">
+            <span className="assistant-input-hint">{t("assistant.enterHint")}</span>
+            <button
+              type="button"
+              className="assistant-send"
+              disabled={!canSend}
+              onClick={send}
+              title={t("assistant.send")}
+              aria-label={t("assistant.send")}
+            >
+              <IconSend size={14} />
+            </button>
+          </div>
         </div>
-        <ErrorBox>{error}</ErrorBox>
       </div>
     </section>
   );

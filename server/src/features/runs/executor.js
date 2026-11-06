@@ -38,7 +38,7 @@ import { addUsage, usageTokens, runTokens } from "./run-usage.js";
 import { FAILOVER_REASONS, describeFailure } from "./delegation-policy.js";
 
 /** ask_agent: see team-calls.js. */
-const { askAgent, spawnBlueprint, spawnInline, completeWorkItem: completeTeamWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems } = createTeamCalls({
+const { askAgent, spawnBlueprint, spawnInline, completeWorkItem: completeTeamWorkItem, openTeamWorkspace, closeTeamWorkspace, finishWorkItems, acquireSlot } = createTeamCalls({
   runs,
   getAgent,
   agentForNode,
@@ -142,8 +142,9 @@ async function spawnAgent({ sessionId, provider, model, tools, accessLevel, prom
   if (!String(prompt || "").trim()) throw new Error("Thiếu prompt cho agent mới.");
 
   checkSpawnLimits(run, policy);
-  // The Team's token budget covers spawned agents too.
-  checkTeamLimits(run, snapshotWorkflow(run).nodes.find((n) => n.id === session.nodeId)?.teamLimits, { delegation: false });
+  // The Team's token budget covers spawned agents too, and so does its limit on agents running at once.
+  const teamLimits = snapshotWorkflow(run).nodes.find((n) => n.id === session.nodeId)?.teamLimits;
+  checkTeamLimits(run, teamLimits, { delegation: false });
 
   const { spawn, ...agentConfig } = buildSpawnedAgent(policy, supervisor, { provider, model, tools, accessLevel });
   const parentTask = run.tasks.find((t) => t.id === parentTaskId);
@@ -160,18 +161,23 @@ async function spawnAgent({ sessionId, provider, model, tools, accessLevel, prom
   };
   run.tasks.push(task);
   emit({ runId, taskId: task.id, type: "task-created", task });
-  task.status = "running";
-  emit({ runId, taskId: task.id, type: "task-status", status: "running" });
   pushTaskLog(runId, task.id, `🧬 ${supervisor.name || "Supervisor"} tạo agent ${agent.name}`);
   if (parentTaskId) pushTaskLog(runId, parentTaskId, `🧬 Tạo agent ${agent.name}: ${label}`);
   pushTaskLog(runId, task.id, `❓ ${prompt}`);
 
+  const release = await acquireSlot(runId, teamLimits?.maxParallel, (line) => pushTaskLog(runId, task.id, line));
+  task.status = "running";
+  emit({ runId, taskId: task.id, type: "task-status", status: "running" });
   let processResult;
   try {
-    processResult = await runAgentProcess({ runId, taskId: task.id, prompt, cwd, agent, depth: depth + 1 });
+    processResult = isCancelling(runId)
+      ? { ok: false, resultText: "", usage: null, failureReason: "cancelled" }
+      : await runAgentProcess({ runId, taskId: task.id, prompt, cwd, agent, depth: depth + 1 });
   } catch (err) {
     pushTaskLog(runId, task.id, `❌ Lỗi nội bộ khi chạy agent: ${err.message}`);
     processResult = { ok: false, resultText: "", usage: null, failureReason: "agent_error" };
+  } finally {
+    release();
   }
   const { ok, resultText, usage, failureReason, sessionId: cliSessionId } = processResult;
 
@@ -338,7 +344,7 @@ async function startWorkflowRun({ prompt, workflowId, cwd, targetBranch = null, 
 /** --------------------------- checkpoint & resume --------------------------- */
 
 /** Per-node progress, rebuilt into the in-memory graph state on resume. Lives on the run so it
- * rides along to runs.json with every other emit — i.e. it survives a crash, not just a stop. */
+ * rides along to the run's saved file with every other emit — i.e. it survives a crash, not just a stop. */
 function emptyCheckpoint() {
   return { nodeStates: {}, outputs: {}, routerChoice: {} };
 }
@@ -615,13 +621,13 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
   const resumedNodes = nodes.filter((n) => state.get(n.id) === "done");
 
   /** Mirrors a node's resolved state into the run's checkpoint. Called on every transition, so
-   * whatever runs.json holds at any moment is enough to resume from. */
+   * whatever the run's saved file holds at any moment is enough to resume from. */
   const checkpointNode = (nodeId) => {
     cp.nodeStates[nodeId] = state.get(nodeId);
     if (output.has(nodeId)) cp.outputs[nodeId] = output.get(nodeId);
     if (routerChoice.has(nodeId)) cp.routerChoice[nodeId] = routerChoice.get(nodeId);
     else delete cp.routerChoice[nodeId];
-    scheduleSaveRuns();
+    scheduleSaveRuns(runId);
   };
 
   const finishTask = (n, task, status) => {
@@ -692,7 +698,7 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
     // Recorded as soon as the CLI reports it: after a crash this is what a resume picks up.
     const onSessionId = (id) => {
       task.sessionId = id;
-      scheduleSaveRuns();
+      scheduleSaveRuns(runId);
     };
 
     while (true) {
@@ -997,7 +1003,7 @@ async function executeGraph(run, workflow, workspace, keptDirs) {
           checkpointNode(id);
         }
         pushTaskLog(runId, task.id, `🔁 Quay lại ${nodeTitle(target)} — vòng ${used + 2}/${e.maxIterations + 1}.`);
-        scheduleSaveRuns();
+        scheduleSaveRuns(runId);
       }
     }
   }

@@ -122,14 +122,17 @@ function memberAgentIds(m) {
  *  - callTimeoutMinutes: wall-clock time one ask_agent call may take, failover included
  *  - runTokenBudget:     tokens (input + output + cache writes) for the whole run, coordinator,
  *                        members and spawned agents together; 0 = no limit
+ *  - maxParallel:        agents the coordinator's calls (ask_agent and spawn_agent) may have running
+ *                        at once; further calls wait their turn
  */
-export const DEFAULT_TEAM_LIMITS = { maxDelegations: 30, callTimeoutMinutes: 30, runTokenBudget: 2_000_000 };
+export const DEFAULT_TEAM_LIMITS = { maxDelegations: 30, callTimeoutMinutes: 30, runTokenBudget: 2_000_000, maxParallel: 3 };
 
 export function normalizeTeamLimits(input) {
   return {
     maxDelegations: intIn(input?.maxDelegations, 1, 1000, DEFAULT_TEAM_LIMITS.maxDelegations),
     callTimeoutMinutes: intIn(input?.callTimeoutMinutes, 1, 24 * 60, DEFAULT_TEAM_LIMITS.callTimeoutMinutes),
     runTokenBudget: intIn(input?.runTokenBudget, 0, 1e9, DEFAULT_TEAM_LIMITS.runTokenBudget),
+    maxParallel: intIn(input?.maxParallel, 1, 20, DEFAULT_TEAM_LIMITS.maxParallel),
   };
 }
 

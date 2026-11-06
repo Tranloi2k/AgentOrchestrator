@@ -12,6 +12,8 @@ import SkillDetailPage from "../features/skills/SkillDetailPage.jsx";
 import PluginDetailPage from "../features/plugins/PluginDetailPage.jsx";
 import WorkflowDetailPage from "../features/workflows/WorkflowDetailPage.jsx";
 import DocsPage from "../features/docs/DocsPage.jsx";
+import ProvidersTab from "../features/providers/ProvidersTab.jsx";
+import ProviderDetailPage from "../features/providers/ProviderDetailPage.jsx";
 
 export default function App() {
   return (
@@ -33,6 +35,9 @@ export default function App() {
         <Route path="/workflows" element={<WorkflowsTab />} />
         <Route path="/workflows/new" element={<WorkflowDetailPage />} />
         <Route path="/workflows/:id" element={<WorkflowDetailPage />} />
+        <Route path="/providers" element={<ProvidersTab />} />
+        <Route path="/providers/new" element={<ProviderDetailPage />} />
+        <Route path="/providers/:id" element={<ProviderDetailPage />} />
         <Route path="/usage" element={<UsageTab />} />
         <Route path="/docs" element={<DocsPage />} />
         <Route path="*" element={<Navigate to="/run" replace />} />

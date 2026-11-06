@@ -16,7 +16,7 @@ export default function AgentsTab() {
   const [duplicateTarget, setDuplicateTarget] = useState(null);
   // What the server said when it refused a delete the list above didn't predict.
   const [deleteError, setDeleteError] = useState("");
-  const [providerAvailability, setProviderAvailability] = useState({ claude: true, codex: true, gemini: true });
+  const [providerAvailability, setProviderAvailability] = useState({ claude: true, codex: true, gemini: true, opencode: true });
 
   function refresh() {
     api.listAgents().then((d) => setAgents(d.agents));

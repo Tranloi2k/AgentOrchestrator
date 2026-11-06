@@ -27,6 +27,7 @@
         "claudeModels": [],
         "codexModels": [],
         "geminiModels": [],
+        "opencodeModels": [],
         "maxAgents": 8,
         "tokenBudget": 1500000,
         "maxAccessLevel": "write"
@@ -113,6 +114,7 @@
           "claudeModels": [],
           "codexModels": [],
           "geminiModels": [],
+          "opencodeModels": [],
           "maxAgents": 8,
           "tokenBudget": 1500000,
           "maxAccessLevel": "write"
@@ -215,6 +217,7 @@
         "claudeModels": [],
         "codexModels": [],
         "geminiModels": [],
+        "opencodeModels": [],
         "maxAgents": 10,
         "tokenBudget": 1500000,
         "maxAccessLevel": "write"
@@ -324,6 +327,7 @@
           "claudeModels": [],
           "codexModels": [],
           "geminiModels": [],
+          "opencodeModels": [],
           "maxAgents": 10,
           "tokenBudget": 1500000,
           "maxAccessLevel": "write"
@@ -449,6 +453,7 @@
         "claudeModels": [],
         "codexModels": [],
         "geminiModels": [],
+        "opencodeModels": [],
         "maxAgents": 8,
         "tokenBudget": 3000000,
         "maxAccessLevel": "write"
@@ -544,6 +549,7 @@
           "claudeModels": [],
           "codexModels": [],
           "geminiModels": [],
+          "opencodeModels": [],
           "maxAgents": 8,
           "tokenBudget": 3000000,
           "maxAccessLevel": "write"
@@ -652,7 +658,8 @@
       "spawnPolicy": {
         "enabled": true,
         "providers": [
-          "gemini"
+          "gemini",
+          "opencode"
         ],
         "claudeModels": [],
         "codexModels": [],
@@ -661,6 +668,7 @@
           "claude-opus-5-5-medium",
           "gemini-3.8-flash-medium"
         ],
+        "opencodeModels": [],
         "maxAgents": 5,
         "tokenBudget": 500000,
         "maxAccessLevel": "full"
@@ -684,7 +692,8 @@
         "spawnPolicy": {
           "enabled": true,
           "providers": [
-            "gemini"
+            "gemini",
+            "opencode"
           ],
           "claudeModels": [],
           "codexModels": [],
@@ -693,6 +702,7 @@
             "claude-opus-5-5-medium",
             "gemini-3.8-flash-medium"
           ],
+          "opencodeModels": [],
           "maxAgents": 5,
           "tokenBudget": 500000,
           "maxAccessLevel": "full"

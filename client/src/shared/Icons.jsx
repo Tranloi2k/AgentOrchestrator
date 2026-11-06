@@ -48,6 +48,15 @@ export function IconPlugin({ size = 16 }) {
   );
 }
 
+export function IconKey({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+      <circle cx="5.25" cy="10.75" r="2.75" />
+      <path d="M7.2 8.8 13 3m-2 2 1.5 1.5M9.5 6.5 11 8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function IconUsage({ size = 16 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
@@ -180,6 +189,26 @@ export function IconSidebar({ size = 16 }) {
   );
 }
 
+export function IconSparkle({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+      <path
+        d="M7 1.75l1.15 3.35a2 2 0 0 0 1.25 1.25L12.75 7.5 9.4 8.65a2 2 0 0 0-1.25 1.25L7 13.25 5.85 9.9A2 2 0 0 0 4.6 8.65L1.25 7.5 4.6 6.35a2 2 0 0 0 1.25-1.25L7 1.75z"
+        strokeLinejoin="round"
+      />
+      <path d="M12.75 1.5v3M11.25 3h3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconSend({ size = 14 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+      <path d="M8 13V3M3.5 7.5L8 3l4.5 4.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function IconInfo({ size = 14 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
@@ -273,10 +302,21 @@ export function IconProviderGemini({ size = 18, title }) {
   );
 }
 
+/** A plain terminal-bracket mark for OpenCode — drawn here, not a copied logo file. */
+export function IconProviderOpenCode({ size = 18, title }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" role="img" aria-label={title || "OpenCode"}>
+      <rect x="2" y="3" width="20" height="18" rx="4" fill="#1f2937" />
+      <path d="m7 9 3 3-3 3m5 0h5" fill="none" stroke="#f9fafb" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 const PROVIDER_ICONS = {
   claude: { Icon: IconProviderClaude, label: "Claude Code" },
   codex: { Icon: IconProviderCodex, label: "Codex" },
   gemini: { Icon: IconProviderGemini, label: "Gemini" },
+  opencode: { Icon: IconProviderOpenCode, label: "OpenCode" },
 };
 
 export function ProviderIcon({ provider = "claude", size = 18, title }) {

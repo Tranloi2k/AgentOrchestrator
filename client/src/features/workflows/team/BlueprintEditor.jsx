@@ -1,10 +1,12 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
+import { api } from "../../../shared/api.js";
 import { IconClose, ProviderIcon } from "../../../shared/Icons.jsx";
 import { usePreferences } from "../../../app/PreferencesContext.jsx";
 import { Button, CheckboxField, ChipSelect, InfoTip, Select, Textarea, TextInput } from "../../../shared/components/index.js";
 import { DetailField } from "../../../shared/components/DetailLayout.jsx";
+import { useOpenRouterModels, openRouterModelLabel } from "../../../shared/useOpenRouterModels.js";
 
-const PROVIDERS = ["claude", "codex", "gemini"];
+const PROVIDERS = ["claude", "codex", "gemini", "opencode"];
 export const ACCESS_LEVELS = ["read", "write", "full"];
 // Same caps as MAX_BLUEPRINT_PROVIDERS and the tool rules in server/src/features/runs/spawn-policy.js.
 const MAX_PROVIDERS = 6;
@@ -21,8 +23,16 @@ export const BLANK_BLUEPRINT = {
   tools: null,
 };
 
-/** The models offered for a provider: the CLI default first, plus a saved model the list lacks. */
-function modelOptions(meta, provider, current, t) {
+/**
+ * The models offered for a provider: the CLI default first, plus a saved model the list lacks.
+ * OpenCode's "default" is the default connection's default model; the rest are its OpenRouter models.
+ */
+function modelOptions(meta, provider, current, t, openRouterModels = [], defaultModel = "") {
+  if (provider === "opencode") {
+    const options = [{ value: "", label: t("agents.model.connectionDefault", { model: defaultModel || "openrouter/free" }) }, ...openRouterModels.map((m) => ({ value: m.value, label: openRouterModelLabel(m, t) }))];
+    if (current && !openRouterModels.some((m) => m.value === current)) options.push({ value: current, label: current });
+    return options;
+  }
   const list = { claude: meta?.models, codex: meta?.codexModels, gemini: meta?.geminiModels }[provider] || [];
   const named = list.filter((m) => m.value).map((m) => ({ value: m.value, label: m.label }));
   const options = [{ value: "", label: t("workflows.blueprint.defaultModel") }, ...named];
@@ -38,6 +48,12 @@ function modelOptions(meta, provider, current, t) {
 function BlueprintProviderList({ providers, meta, onChange }) {
   const { t } = usePreferences();
   const availability = meta?.providerAvailability || {};
+  const usesOpenCode = providers.some((p) => p.provider === "opencode");
+  const openRouter = useOpenRouterModels("default", usesOpenCode);
+  const [defaultModel, setDefaultModel] = useState("");
+  useEffect(() => {
+    if (usesOpenCode) api.listProviders().then((d) => setDefaultModel((d.providers.find((c) => c.isDefault) || d.providers[0])?.defaultModel || ""));
+  }, [usesOpenCode]);
   const update = (i, patch) => onChange(providers.map((p, j) => (j === i ? { ...p, ...patch } : p)));
   const move = (from, to) => {
     const next = providers.slice();
@@ -79,7 +95,7 @@ function BlueprintProviderList({ providers, meta, onChange }) {
             <Select
               label={t("workflows.blueprint.model")}
               value={p.model || ""}
-              options={modelOptions(meta, p.provider, p.model, t)}
+              options={modelOptions(meta, p.provider, p.model, t, openRouter.models, defaultModel)}
               onChange={(e) => update(i, { model: e.target.value })}
             />
             <Textarea

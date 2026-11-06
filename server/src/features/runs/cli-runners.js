@@ -22,6 +22,9 @@ import { getPlugin } from "../plugins/plugins.store.js";
 import { nodeTitle } from "../workflows/node-title.js";
 import { pushTaskLog, setClaudeQuota, runs } from "./run-store.js";
 import { commitInstruction } from "./commit-message.js";
+import { connectionForAgent } from "../providers/providers.store.js";
+import { effectiveModel } from "../providers/provider-model.js";
+import { OPENROUTER_KEY_ENV, buildOpenCodeConfig, opencodeModelId, addOpenCodeUsage } from "./opencode-config.js";
 
 /** --------------------------- stopping a run --------------------------- */
 
@@ -180,6 +183,8 @@ function buildAgentBridgeContext(agent, node, workflow, { runId, taskId, cwd, de
     AGENT_BRIDGE_CWD: cwd || "",
     AGENT_BRIDGE_CALLABLE: JSON.stringify(callable),
     AGENT_BRIDGE_WORK_ITEMS: workItems ? "1" : "",
+    // The team's limit on agents running at once (told to the model; the server queues the rest).
+    AGENT_BRIDGE_MAX_PARALLEL: String(node?.teamLimits?.maxParallel || ""),
     // Shown to the model in the tool description only; the server enforces the real policy,
     // including the ceiling on what it spawns (spawnCeiling: the Team's maxAccessLevel).
     AGENT_BRIDGE_SPAWN_POLICY: spawnPolicy
@@ -299,7 +304,7 @@ function buildPluginArgs(agent) {
   return args;
 }
 
-const RUNNERS = { claude: runClaudeProcess, codex: runCodexProcess, gemini: runAgyProcess };
+const RUNNERS = { claude: runClaudeProcess, codex: runCodexProcess, gemini: runAgyProcess, opencode: runOpenCodeProcess };
 
 /** Dispatches to the right local CLI based on the agent's `provider` — same {ok, resultText}
  * shape either way, so every call site (ad-hoc run, workflow node, ask_agent, spawn_agent) stays
@@ -984,6 +989,170 @@ function normalizeAgyUsage(result, wallDurationMs) {
     costUsd: null,
     durationMs: typeof result.duration_seconds === "number" ? Math.round(result.duration_seconds * 1000) : wallDurationMs,
   };
+}
+
+/** --------------------------- OpenCode (provider "opencode", OpenRouter models) --------------------------- */
+
+/**
+ * Runs a single `opencode run --format json` process on an OpenRouter model, with the API key of
+ * the agent's connection (Providers page; the default one when the agent names none).
+ *
+ * Everything per-run goes through the environment, never argv: the prompt on stdin (multi-line
+ * argv is cut at its first line by the Windows npm shim, as with claude/codex), the key in
+ * OPENROUTER_KEY_ENV, and the rest — permissions from the access level, the system prompt file,
+ * the agent-bridge MCP server — as inline config in OPENCODE_CONFIG_CONTENT (see opencode-config.js).
+ *
+ * `--format json` prints one event per line: step_start, text (part.text), tool_use (part.tool,
+ * part.state), step_finish (part.tokens, part.cost) and error (error.data.message/statusCode).
+ * The answer is the text of the last message that had any.
+ */
+function runOpenCodeProcess({ runId, taskId, prompt, cwd, agent, node, workflow, depth = 0, resume = null, onSessionId = null }) {
+  const pushLog = (line) => pushTaskLog(runId, taskId, line);
+  const connection = connectionForAgent(agent);
+  if (!connection?.apiKey) {
+    pushLog("❌ Chưa có API key OpenRouter. Thêm một kết nối ở trang Providers rồi chạy lại.");
+    return Promise.resolve({ ok: false, resultText: "", usage: null, failureReason: "provider_unavailable" });
+  }
+  const model = opencodeModelId(effectiveModel(agent?.model, connection));
+
+  return new Promise((resolve) => {
+    const systemPrompt = buildSystemPrompt(agent);
+    let instructionsFile = null;
+    if (systemPrompt) {
+      instructionsFile = path.join(tmpdir(), `opencode-system-${taskId}-${randomBytes(4).toString("hex")}.md`);
+      writeFileSync(instructionsFile, systemPrompt, "utf-8");
+    }
+    const cleanup = () => {
+      if (!instructionsFile) return;
+      try {
+        rmSync(instructionsFile, { force: true });
+      } catch {
+        /* ignore */
+      }
+      instructionsFile = null;
+    };
+
+    const bridgeEnv = buildAgentBridgeContext(agent, node, workflow, { runId, taskId, cwd, depth });
+    const config = buildOpenCodeConfig({
+      accessLevel: agent?.accessLevel,
+      instructionsFile,
+      bridge: bridgeEnv ? { script: BRIDGE_SCRIPT, env: bridgeEnv, timeoutMs: BRIDGE_TOOL_TIMEOUT_SEC * 1000 } : null,
+    });
+
+    const args = ["run", "--format", "json", "-m", model, "--dir", cwd];
+    // Like claude --fork-session: each turn gets its own session, the earlier one stays as it was.
+    if (resume) args.push("--session", resume, "--fork");
+
+    const env = {
+      ...process.env,
+      [OPENROUTER_KEY_ENV]: connection.apiKey,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+      OPENCODE_DISABLE_AUTOUPDATE: "1",
+    };
+    pushLog(`ℹ️ OpenCode · ${model} · kết nối "${connection.name}" (${connection.tier === "free" ? "Free" : "Paid"})`);
+    const child = spawn("opencode", args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    trackChild(runId, child, taskId);
+    closeBridgeSessionOnExit(child, bridgeEnv);
+    child.stdin.on("error", () => {
+      /* opencode already exited — its stderr is the useful error, not EPIPE */
+    });
+    child.stdin.end(prompt);
+
+    let buffer = "";
+    let usage = null;
+    let stderrText = "";
+    let errorText = "";
+    let toolErrors = "";
+    let quotaSignal = false;
+    let sessionId = null;
+    let messageId = null;
+    let messageText = "";
+    let resultText = "";
+    const startedAt = Date.now();
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      let idx;
+      while ((idx = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line) continue;
+        let evt;
+        try {
+          evt = JSON.parse(line);
+        } catch {
+          pushLog(line);
+          continue;
+        }
+        if (evt.sessionID && evt.sessionID !== sessionId) {
+          sessionId = evt.sessionID;
+          onSessionId?.(sessionId);
+        }
+        const part = evt.part || {};
+        if (evt.type === "text" && part.text) {
+          if (part.messageID !== messageId) {
+            messageId = part.messageID;
+            messageText = "";
+          }
+          messageText = messageText ? `${messageText}\n${part.text}` : part.text;
+          resultText = messageText;
+          pushLog(`💬 ${part.text}`);
+        } else if (evt.type === "tool_use") {
+          const state = part.state || {};
+          if (state.status === "error") {
+            const msg = String(state.error || "lỗi");
+            toolErrors += `\n${msg}`;
+            pushLog(`❌ tool ${part.tool || "?"} lỗi: ${msg}`);
+          } else {
+            pushLog(`🔧 dùng tool: ${part.tool || "?"} ${summarizeInput(state.input)}`);
+          }
+        } else if (evt.type === "step_finish") {
+          usage = addOpenCodeUsage(usage, evt, Date.now() - startedAt);
+        } else if (evt.type === "error") {
+          const data = evt.error?.data || {};
+          const status = Number(data.statusCode) || 0;
+          // 429: the free models' per-minute/per-day cap; 402: out of credit on a paid key.
+          if (status === 429 || status === 402) quotaSignal = true;
+          const msg = `${data.message || evt.error?.name || "lỗi không rõ"}${status ? ` (HTTP ${status})` : ""}`;
+          errorText += `\n${msg}`;
+          pushLog(`❌ OpenCode: ${msg}`);
+        }
+      }
+    });
+
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderrText += text;
+      pushLog(`⚠️ ${text.trim()}`);
+    });
+
+    child.on("error", (err) => {
+      cleanup();
+      pushLog(`❌ Lỗi khởi chạy opencode CLI: ${err.message}`);
+      resolve({
+        ok: false,
+        resultText: "",
+        usage: null,
+        failureReason: classifyAgentFailure({ spawnError: err, exitCode: 1, stderr: stderrText }),
+      });
+    });
+
+    child.on("close", (code) => {
+      cleanup();
+      if (resultText) pushLog(`✅ Kết quả cuối:\n${resultText}`);
+      const ok = code === 0 && !errorText && !!resultText.trim();
+      const stderr = `${stderrText}${errorText}${toolErrors}`;
+      const failureReason = ok ? null : classifyAgentFailure({ exitCode: code || 1, stderr, resultText, quotaSignal, noResult: !resultText.trim() });
+      resolve({
+        ok,
+        resultText,
+        usage,
+        sessionId,
+        failureReason,
+        quotaResetAt: quotaResetFor(failureReason, stderr),
+      });
+    });
+  });
 }
 
 /** When a quota failure says its quota comes back (ms since the epoch), else null. */
